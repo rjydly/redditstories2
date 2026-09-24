@@ -4,23 +4,18 @@ import sys
 import random
 import asyncio
 import subprocess
-import urllib.request
-import feedparser
 from PIL import Image, ImageDraw, ImageFont
 import edge_tts
+import feedparser
 
 SUBREDDIT_NAME = os.getenv("SUBREDDIT", "AskReddit")
 VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
 
-# Vídeos de fons directes (sense passar per YouTube per evitar el bloqueig anti-bot)
-# Clips de Minecraft Parkour i GTA a Internet Archive
-BG_VIDEO_URLS = [
-    "https://archive.org/download/minecraft-parkour-gameplay-no-copyright_202302/minecraft-parkour.mp4",
-    "https://archive.org/download/gta-5-stunt-races-gameplay-no-copyright/gta-5-stunt.mp4"
-]
+# Vídeo de prova lliure de drets allotjat a Wikimedia Commons (CDN d'alta disponibilitat)
+FALLBACK_VIDEO_URL = "https://upload.wikimedia.org/wikipedia/commons/transcoded/f/f1/Big_Buck_Bunny_4K_30fps_HD.webm/Big_Buck_Bunny_4K_30fps_HD.webm.720p.vp9.webm"
 
 def get_reddit_post():
-    """Llegeix el subreddit mitjançant RSS públic."""
+    """Llegeix el subreddit mitjançant RSS públic ignorant anuncis de moderadors."""
     print(f"📥 Llegint r/{SUBREDDIT_NAME} via RSS públic...")
     url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
     
@@ -29,31 +24,36 @@ def get_reddit_post():
     if not feed.entries:
         raise Exception(f"No s'han pogut obtenir entrades RSS de r/{SUBREDDIT_NAME}.")
 
+    blocked_keywords = ["moderator", "looking for", "rules", "megathread", "weekly thread", "discord"]
+
     for entry in feed.entries:
-        title = entry.title
-        if not title.startswith("[") and 20 < len(title) < 220:
+        title = entry.title.strip()
+        title_lower = title.lower()
+
+        # Filtrar que no sigui un post administratiu i que tingui una mida lògica
+        is_mod_post = any(kw in title_lower for kw in blocked_keywords)
+        if not is_mod_post and 25 < len(title) < 220:
             author_match = re.search(r"/user/([^/]+)", entry.get("author", ""))
             author = author_match.group(1) if author_match else "anònim"
             
             return {
-                "id": entry.get("id", "post"),
                 "title": title,
                 "author": author,
                 "subreddit": SUBREDDIT_NAME,
                 "url": entry.link
             }
             
-    prime = feed.entries[0]
+    # Si tots són moderació, agafem el segon per evitar l'anunci principal
+    entry = feed.entries[1] if len(feed.entries) > 1 else feed.entries[0]
     return {
-        "id": prime.get("id", "post"),
-        "title": prime.title,
+        "title": entry.title,
         "author": "RedditUser",
         "subreddit": SUBREDDIT_NAME,
-        "url": prime.link
+        "url": entry.link
     }
 
 async def generate_audio(text, output_path="audio.mp3"):
-    """Genera la veu amb Edge-TTS gratuït i calcula la durada exacta."""
+    """Genera l'àudio TTS i en mesura la durada exacta."""
     print(f"🗣️ Generant àudio ({VOICE})...")
     communicate = edge_tts.Communicate(text, VOICE)
     await communicate.save(output_path)
@@ -74,15 +74,13 @@ def create_reddit_card(post, output_path="card.png"):
     draw = ImageDraw.Draw(img)
 
     try:
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
         font_sub = ImageFont.truetype("DejaVuSans.ttf", 24)
     except:
         font_title = font_sub = ImageFont.load_default()
 
-    # Capçalera
     draw.text((40, 40), f"r/{post['subreddit']}  •  Publicat per u/{post['author']}", fill=(129, 131, 132), font=font_sub)
 
-    # Text del títol adaptat a múltiples línies
     words = post["title"].split()
     lines, current_line = [], []
     for word in words:
@@ -96,41 +94,51 @@ def create_reddit_card(post, output_path="card.png"):
     y = 105
     for line in lines[:5]:
         draw.text((40, y), line, fill=(215, 218, 220), font=font_title)
-        y += 46
+        y += 44
 
     draw.text((40, height - 60), "⬆️ Post Destacat  •  💬 Comentaris", fill=(129, 131, 132), font=font_sub)
     img.save(output_path)
 
-def download_background(duration, output_path="bg.mp4"):
-    """Descarrega el fons directament sense yt-dlp per evitar bloquejos de bots."""
-    print("🎬 Descarregant vídeo de fons directe...")
-    chosen_url = random.choice(BG_VIDEO_URLS)
-    raw_video = "raw_bg.mp4"
+def prepare_background(duration, output_path="bg.mp4"):
+    """Prepara el fons. Si ja tens 'background.mp4' al repo el fa servir; si no, el genera amb FFmpeg."""
+    print("🎬 Preparant el vídeo de fons...")
     
-    # Descarreguem el vídeo sencer o fragment inicial amb curl (suporta redireccions)
-    subprocess.run(["curl", "-sL", chosen_url, "-o", raw_video], check=True)
-    
-    # Retallem un fragment a l'atzar amb ffmpeg segons la durada de l'àudio
-    start_time = random.randint(10, 60)
-    cmd = [
+    # 1. Opció preferent: L'usuari ha posat un background.mp4 al seu repo
+    if os.path.exists("background.mp4"):
+        print("📁 Utilitzant 'background.mp4' del propi repositori!")
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", "10", "-i", "background.mp4",
+            "-t", str(int(duration) + 2), "-c:v", "libx264", "-an", output_path
+        ], check=True)
+        return
+
+    # 2. Si no hi és al repo, intentem descarregar el vídeo fiable de Wikimedia
+    raw_video = "temp_bg.webm"
+    try:
+        print("🌐 Descarregant clip fiable...")
+        subprocess.run(["curl", "-fSL", FALLBACK_VIDEO_URL, "-o", raw_video], check=True, timeout=30)
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", "30", "-i", raw_video,
+            "-t", str(int(duration) + 2), "-c:v", "libx264", "-an", output_path
+        ], check=True)
+        if os.path.exists(raw_video):
+            os.remove(raw_video)
+        return
+    except Exception as e:
+        print(f"⚠️ No s'ha pogut descarregar el vídeo extern ({e}). Generant fons dinàmic amb FFmpeg...")
+
+    # 3. Fallback d'emergència: generador de fons de colors fluid natiu de FFmpeg (mai falla)
+    subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(start_time),
-        "-i", raw_video,
-        "-t", str(int(duration) + 2),
-        "-c:v", "copy",
-        "-an",
-        output_path
-    ]
-    subprocess.run(cmd, check=True)
-    
-    if os.path.exists(raw_video):
-        os.remove(raw_video)
+        "-f", "lavfi", "-i", f"mptestsrc=s=1080x1920:d={int(duration) + 2}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path
+    ], check=True)
 
 def render_video(duration, output_path="final_video.mp4"):
-    """Munta el vídeo final 9:16 (1080x1920) amb targeta i àudio."""
-    print("🎞️ Renderitzant vídeo vertical amb FFmpeg...")
+    """Munta el vídeo final vertical 9:16 (1080x1920)."""
+    print("🎞️ Renderitzant vídeo amb FFmpeg...")
     filter_complex = (
-        "[0:v]crop=ih*(9/16):ih,scale=1080:1920[bg];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];"
         "[1:v]scale=950:-1[card];"
         "[bg][card]overlay=(W-w)/2:(H-h)/2[v]"
     )
@@ -156,7 +164,7 @@ async def main():
     
     duration = await generate_audio(post["title"], "audio.mp3")
     create_reddit_card(post, "card.png")
-    download_background(duration, "bg.mp4")
+    prepare_background(duration, "bg.mp4")
     render_video(duration, "final_video.mp4")
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)

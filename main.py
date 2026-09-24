@@ -4,178 +4,267 @@ import sys
 import random
 import asyncio
 import subprocess
+import requests
+import feedparser
 from PIL import Image, ImageDraw, ImageFont
 import edge_tts
-import feedparser
 
+# Configuració: Subreddit en anglès i veu anglesa d'alta qualitat
 SUBREDDIT_NAME = os.getenv("SUBREDDIT", "AskReddit")
-VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
+VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")  # Veu masculina clara d'estil narrador
+TARGET_TOTAL_DURATION = 55  # Durada màxima ideal per TikTok/Reels (en segons)
 
-def get_reddit_post():
-    """Llegeix el subreddit mitjançant RSS públic ignorant anuncis."""
-    print(f"📥 Llegint r/{SUBREDDIT_NAME} via RSS públic...")
-    url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
+def get_reddit_thread_with_comments():
+    """Obté el títol i els millors comentaris en anglès sense cap API key."""
+    print(f"📥 Fetching top thread and comments from r/{SUBREDDIT_NAME}...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
     
-    feed = feedparser.parse(url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
+    # 1. Obtenir el post destacat via RSS
+    rss_url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
+    feed = feedparser.parse(rss_url, agent=headers["User-Agent"])
     
-    if not feed.entries:
-        raise Exception(f"No s'han pogut obtenir entrades RSS de r/{SUBREDDIT_NAME}.")
-
     blocked_keywords = ["moderator", "looking for", "rules", "megathread", "weekly thread", "discord"]
-
+    selected_entry = None
+    
     for entry in feed.entries:
         title = entry.title.strip()
-        title_lower = title.lower()
+        if not any(kw in title.lower() for kw in blocked_keywords) and 20 < len(title) < 200:
+            selected_entry = entry
+            break
+            
+    if not selected_entry:
+        selected_entry = feed.entries[1] if len(feed.entries) > 1 else feed.entries[0]
 
-        is_mod_post = any(kw in title_lower for kw in blocked_keywords)
-        if not is_mod_post and 25 < len(title) < 220:
-            author_match = re.search(r"/user/([^/]+)", entry.get("author", ""))
-            author = author_match.group(1) if author_match else "anònim"
-            
-            return {
-                "title": title,
-                "author": author,
-                "subreddit": SUBREDDIT_NAME,
-                "url": entry.link
-            }
-            
-    entry = feed.entries[1] if len(feed.entries) > 1 else feed.entries[0]
+    post_url = selected_entry.link
+    author_match = re.search(r"/user/([^/]+)", selected_entry.get("author", ""))
+    post_author = author_match.group(1) if author_match else "RedditUser"
+
+    # 2. Obtenir els comentaris afegint .json a la URL del post
+    json_url = post_url.rstrip("/") + ".json"
+    comments = []
+    
+    try:
+        res = requests.get(json_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            comment_children = data[1]["data"]["children"]
+            for child in comment_children:
+                c_data = child.get("data", {})
+                body = c_data.get("body", "").strip()
+                author = c_data.get("author", "anonymous")
+                ups = c_data.get("ups", random.randint(500, 4500))
+                
+                # Ignorar comentaris eliminats o massa llargs/curts
+                if body and body != "[deleted]" and body != "[removed]" and 40 < len(body) < 350:
+                    # Netejar enllaços
+                    clean_body = re.sub(r'http\S+', '', body)
+                    comments.append({
+                        "author": author,
+                        "body": clean_body,
+                        "ups": f"{ups:,}" if isinstance(ups, int) else str(ups)
+                    })
+                if len(comments) >= 5:
+                    break
+    except Exception as e:
+        print(f"⚠️ Could not fetch comments via JSON ({e}), continuing with mock top comments.")
+
+    # Fallback si Reddit bloquegés el JSON de comentaris
+    if not comments:
+        comments = [
+            {"author": "CuriousThinker", "body": "Honestly, the hardest part is realizing that nobody is coming to save you. You have to build the life you want yourself.", "ups": "3.4k"},
+            {"author": "LifeTraveler", "body": "Most people are not thinking about you as much as you think they are. Everyone is busy dealing with their own problems.", "ups": "2.1k"},
+            {"author": "RealistView", "body": "Time goes by way faster than you expect once your routine sets in. Cherish the quiet moments.", "ups": "1.8k"}
+        ]
+
     return {
-        "title": entry.title,
-        "author": "RedditUser",
+        "title": selected_entry.title.strip(),
+        "author": post_author,
         "subreddit": SUBREDDIT_NAME,
-        "url": entry.link
+        "comments": comments
     }
 
-async def generate_audio(text, output_path="audio.mp3"):
-    """Genera l'àudio TTS i en mesura la durada exacta."""
-    print(f"🗣️ Generant àudio ({VOICE})...")
+async def generate_speech(text, output_file):
+    """Genera l'àudio TTS en anglès i en retorna la durada."""
     communicate = edge_tts.Communicate(text, VOICE)
-    await communicate.save(output_path)
+    await communicate.save(output_file)
     
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_path],
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", output_file],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
     return float(result.stdout.strip())
 
-def create_reddit_card(post, output_path="card.png"):
-    """Dibuixa la targeta d'estil Reddit Dark Mode."""
-    print("🎨 Dibuixant la targeta del post...")
-    width, height = 900, 450
-    img = Image.new("RGBA", (width, height), color=(26, 26, 27, 255))
+def create_card_image(author, text, subreddit=None, is_title=False, output_path="card.png"):
+    """Dibuixa targetes visuals professionals d'estil Reddit Dark Mode."""
+    width, height = 920, 480
+    img = Image.new("RGBA", (width, height), color=(24, 25, 26, 255))  # Reddit Dark Slate
     draw = ImageDraw.Draw(img)
 
     try:
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
-        font_sub = ImageFont.truetype("DejaVuSans.ttf", 24)
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 32)
+        font_sub = ImageFont.truetype("DejaVuSans.ttf", 22)
     except:
         font_title = font_sub = ImageFont.load_default()
 
-    draw.text((40, 40), f"r/{post['subreddit']}  •  Publicat per u/{post['author']}", fill=(129, 131, 132), font=font_sub)
+    # Capçalera de la targeta
+    if is_title:
+        header = f"r/{subreddit}  •  Posted by u/{author}"
+    else:
+        header = f"u/{author}  •  Top Comment"
+    draw.text((45, 40), header, fill=(138, 141, 143), font=font_sub)
 
-    words = post["title"].split()
+    # Text principal amb ajustament automàtic de línies
+    words = text.split()
     lines, current_line = [], []
     for word in words:
         current_line.append(word)
-        if len(" ".join(current_line)) > 35:
+        if len(" ".join(current_line)) > 38:
             lines.append(" ".join(current_line))
             current_line = []
     if current_line:
         lines.append(" ".join(current_line))
 
-    y = 105
-    for line in lines[:5]:
-        draw.text((40, y), line, fill=(215, 218, 220), font=font_title)
+    y = 100
+    for line in lines[:6]:  # Màxim 6 línies
+        draw.text((45, y), line, fill=(225, 227, 229), font=font_title)
         y += 44
 
-    draw.text((40, height - 60), "⬆️ Post Destacat  •  💬 Comentaris", fill=(129, 131, 132), font=font_sub)
+    # Icones de vot a baix
+    footer = "⬆️ Upvote  •  💬 Reply  •  Share"
+    draw.text((45, height - 55), footer, fill=(138, 141, 143), font=font_sub)
+
     img.save(output_path)
 
 def find_local_background():
-    """Cerca automàticament qualsevol fitxer de vídeo al repositori."""
-    posibles_noms = [
-        "background.mp4", "Background.mp4", "BACKGROUND.mp4", "BACKGROUND.MP4",
-        "bg.mp4", "gameplay.mp4", "video.mp4",
-        "assets/background.mp4", "assets/Background.mp4"
-    ]
-    for nom in posibles_noms:
-        if os.path.exists(nom):
-            return nom
-            
-    # Si no coincideix el nom, cerca el primer .mp4 que trobi que no sigui temporal
+    """Busca el teu background.mp4 al repo."""
+    for fitxer in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
+        if os.path.exists(fitxer):
+            return fitxer
     for fitxer in os.listdir("."):
-        if fitxer.lower().endswith(".mp4") and fitxer not in ["final_video.mp4", "bg.mp4", "temp_bg.mp4"]:
+        if fitxer.lower().endswith(".mp4") and fitxer not in ["final_video.mp4", "bg.mp4"]:
             return fitxer
     return None
 
-def prepare_background(duration, output_path="bg.mp4"):
-    """Prepara el fons aprofitant el teu vídeo local."""
-    print("🎬 Preparant el vídeo de fons...")
-    dur_sec = max(5, int(duration) + 2)
+async def main():
+    thread = get_reddit_thread_with_comments()
+    print(f"\n📌 Post: {thread['title']}")
+    
+    os.makedirs("temp", exist_ok=True)
+    
+    # 1. Generar àudio i targeta del TÍTOL
+    print("🗣️ Generating speech for Title...")
+    title_audio = "temp/title.mp3"
+    title_dur = await generate_speech(thread["title"], title_audio)
+    
+    create_card_image(thread["author"], thread["title"], subreddit=thread["subreddit"], is_title=True, output_path="temp/card_0.png")
+    
+    segments = [{
+        "audio": title_audio,
+        "duration": title_dur,
+        "image": "temp/card_0.png"
+    }]
+    
+    current_total_duration = title_dur
+    
+    # 2. Generar àudio i targetes dels COMENTARIS seqüencials
+    for idx, c in enumerate(thread["comments"]):
+        if current_total_duration >= TARGET_TOTAL_DURATION:
+            break
+            
+        print(f"🗣️ Generating speech for Comment {idx + 1} (u/{c['author']})...")
+        c_audio = f"temp/c_{idx}.mp3"
+        c_dur = await generate_speech(c["body"], c_audio)
+        
+        c_img = f"temp/card_{idx + 1}.png"
+        create_card_image(c["author"], c["body"], is_title=False, output_path=c_img)
+        
+        segments.append({
+            "audio": c_audio,
+            "duration": c_dur,
+            "image": c_img
+        })
+        current_total_duration += c_dur
 
-    local_bg = find_local_background()
+    print(f"\n⏱️ Total video duration planned: {current_total_duration:.1f}s ({len(segments)} cards)")
 
-    if local_bg:
-        print(f"📁 S'ha trobat el vídeo del repositori: '{local_bg}'!")
+    # 3. Concatenar tots els àudios en un sol fitxer
+    with open("temp/audio_list.txt", "w") as f:
+        for seg in segments:
+            f.write(f"file '{os.path.basename(seg['audio'])}'\n")
+            
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", "temp/audio_list.txt", "-c", "copy", "temp/full_audio.mp3"
+    ], cwd="temp", check=True)
+
+    # 4. Preparar el vídeo de fons
+    bg_file = find_local_background()
+    if bg_file:
+        print(f"📁 Using local background: {bg_file}")
         start_time = random.randint(0, 30)
         subprocess.run([
-            "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-ss", str(start_time),
-            "-i", local_bg,
-            "-t", str(dur_sec),
-            "-c:v", "libx264",
-            "-an",
-            output_path
+            "ffmpeg", "-y", "-stream_loop", "-1", "-ss", str(start_time),
+            "-i", bg_file, "-t", str(int(current_total_duration) + 2),
+            "-c:v", "libx264", "-an", "temp/bg.mp4"
         ], check=True)
-        return
+    else:
+        print("⚠️ No local background found. Generating studio color background...")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={int(current_total_duration) + 2}",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "temp/bg.mp4"
+        ], check=True)
 
-    print("⚠️ No s'ha trobat cap .mp4 al repositori. Generant fons intern de seguretat...")
-    # Generador d'estudi de FFmpeg (100% infal·lible, sense internet)
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={dur_sec}",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path
-    ], check=True)
-
-def render_video(duration, output_path="final_video.mp4"):
-    """Munta el vídeo final vertical 9:16 (1080x1920)."""
-    print("🎞️ Renderitzant vídeo amb FFmpeg...")
-    filter_complex = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg];"
-        "[1:v]scale=950:-1[card];"
-        "[bg][card]overlay=(W-w)/2:(H-h)/2[v]"
-    )
+    # 5. Muntar el vídeo amb canvis de targeta sincronitzats
+    print("🎞️ Assembling final video with synchronized card switches...")
+    
+    # Construir els inputs i el filtre complex de FFmpeg
+    inputs = ["-i", "temp/bg.mp4"]
+    for seg in segments:
+        inputs.extend(["-i", seg["image"]])
+    inputs.extend(["-i", "temp/full_audio.mp3"])
+    
+    filter_chains = ["[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];"]
+    
+    running_time = 0.0
+    for i, seg in enumerate(segments):
+        start_t = running_time
+        end_t = running_time + seg["duration"]
+        running_time = end_t
+        
+        in_tag = f"[v{i}]"
+        out_tag = f"[v{i+1}]"
+        card_idx = i + 1
+        
+        filter_chains.append(
+            f"[{card_idx}:v]scale=920:-1[scaled_c{i}];"
+            f"{in_tag}[scaled_c{i}]overlay=(W-w)/2:(H-h)/2:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_tag};"
+        )
+        
+    last_v_tag = f"[v{len(segments)}]"
+    filter_complex_str = "".join(filter_chains)
+    
     cmd = [
         "ffmpeg", "-y",
-        "-i", "bg.mp4",
-        "-i", "card.png",
-        "-i", "audio.mp3",
-        "-filter_complex", filter_complex,
-        "-map", "[v]",
-        "-map", "2:a",
+        *inputs,
+        "-filter_complex", filter_complex_str,
+        "-map", last_v_tag,
+        "-map", f"{len(segments) + 1}:a",
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-t", str(duration),
+        "-t", str(current_total_duration),
         "-pix_fmt", "yuv420p",
-        output_path
+        "final_video.mp4"
     ]
-    subprocess.run(cmd, check=True)
-
-async def main():
-    post = get_reddit_post()
-    print(f"\n📌 Post triat: {post['title']}")
     
-    duration = await generate_audio(post["title"], "audio.mp3")
-    create_reddit_card(post, "card.png")
-    prepare_background(duration, "bg.mp4")
-    render_video(duration, "final_video.mp4")
+    subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n✅ Vídeo generat amb èxit! Mida: {size_mb:.2f} MB | Durada: {duration:.1f}s\n")
+    print(f"\n🎉 SUCCESS! Full Reddit video generated: final_video.mp4 ({size_mb:.2f} MB, {current_total_duration:.1f}s)")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -11,11 +11,8 @@ import feedparser
 SUBREDDIT_NAME = os.getenv("SUBREDDIT", "AskReddit")
 VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
 
-# Vídeo de prova lliure de drets allotjat a Wikimedia Commons (CDN d'alta disponibilitat)
-FALLBACK_VIDEO_URL = "https://upload.wikimedia.org/wikipedia/commons/transcoded/f/f1/Big_Buck_Bunny_4K_30fps_HD.webm/Big_Buck_Bunny_4K_30fps_HD.webm.720p.vp9.webm"
-
 def get_reddit_post():
-    """Llegeix el subreddit mitjançant RSS públic ignorant anuncis de moderadors."""
+    """Llegeix el subreddit mitjançant RSS públic ignorant anuncis."""
     print(f"📥 Llegint r/{SUBREDDIT_NAME} via RSS públic...")
     url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
     
@@ -30,7 +27,6 @@ def get_reddit_post():
         title = entry.title.strip()
         title_lower = title.lower()
 
-        # Filtrar que no sigui un post administratiu i que tingui una mida lògica
         is_mod_post = any(kw in title_lower for kw in blocked_keywords)
         if not is_mod_post and 25 < len(title) < 220:
             author_match = re.search(r"/user/([^/]+)", entry.get("author", ""))
@@ -43,7 +39,6 @@ def get_reddit_post():
                 "url": entry.link
             }
             
-    # Si tots són moderació, agafem el segon per evitar l'anunci principal
     entry = feed.entries[1] if len(feed.entries) > 1 else feed.entries[0]
     return {
         "title": entry.title,
@@ -99,38 +94,50 @@ def create_reddit_card(post, output_path="card.png"):
     draw.text((40, height - 60), "⬆️ Post Destacat  •  💬 Comentaris", fill=(129, 131, 132), font=font_sub)
     img.save(output_path)
 
+def find_local_background():
+    """Cerca automàticament qualsevol fitxer de vídeo al repositori."""
+    posibles_noms = [
+        "background.mp4", "Background.mp4", "BACKGROUND.mp4", "BACKGROUND.MP4",
+        "bg.mp4", "gameplay.mp4", "video.mp4",
+        "assets/background.mp4", "assets/Background.mp4"
+    ]
+    for nom in posibles_noms:
+        if os.path.exists(nom):
+            return nom
+            
+    # Si no coincideix el nom, cerca el primer .mp4 que trobi que no sigui temporal
+    for fitxer in os.listdir("."):
+        if fitxer.lower().endswith(".mp4") and fitxer not in ["final_video.mp4", "bg.mp4", "temp_bg.mp4"]:
+            return fitxer
+    return None
+
 def prepare_background(duration, output_path="bg.mp4"):
-    """Prepara el fons. Si ja tens 'background.mp4' al repo el fa servir; si no, el genera amb FFmpeg."""
+    """Prepara el fons aprofitant el teu vídeo local."""
     print("🎬 Preparant el vídeo de fons...")
-    
-    # 1. Opció preferent: L'usuari ha posat un background.mp4 al seu repo
-    if os.path.exists("background.mp4"):
-        print("📁 Utilitzant 'background.mp4' del propi repositori!")
+    dur_sec = max(5, int(duration) + 2)
+
+    local_bg = find_local_background()
+
+    if local_bg:
+        print(f"📁 S'ha trobat el vídeo del repositori: '{local_bg}'!")
+        start_time = random.randint(0, 30)
         subprocess.run([
-            "ffmpeg", "-y", "-ss", "10", "-i", "background.mp4",
-            "-t", str(int(duration) + 2), "-c:v", "libx264", "-an", output_path
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",
+            "-ss", str(start_time),
+            "-i", local_bg,
+            "-t", str(dur_sec),
+            "-c:v", "libx264",
+            "-an",
+            output_path
         ], check=True)
         return
 
-    # 2. Si no hi és al repo, intentem descarregar el vídeo fiable de Wikimedia
-    raw_video = "temp_bg.webm"
-    try:
-        print("🌐 Descarregant clip fiable...")
-        subprocess.run(["curl", "-fSL", FALLBACK_VIDEO_URL, "-o", raw_video], check=True, timeout=30)
-        subprocess.run([
-            "ffmpeg", "-y", "-ss", "30", "-i", raw_video,
-            "-t", str(int(duration) + 2), "-c:v", "libx264", "-an", output_path
-        ], check=True)
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        return
-    except Exception as e:
-        print(f"⚠️ No s'ha pogut descarregar el vídeo extern ({e}). Generant fons dinàmic amb FFmpeg...")
-
-    # 3. Fallback d'emergència: generador de fons de colors fluid natiu de FFmpeg (mai falla)
+    print("⚠️ No s'ha trobat cap .mp4 al repositori. Generant fons intern de seguretat...")
+    # Generador d'estudi de FFmpeg (100% infal·lible, sense internet)
     subprocess.run([
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"mptestsrc=s=1080x1920:d={int(duration) + 2}",
+        "-f", "lavfi", "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={dur_sec}",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path
     ], check=True)
 

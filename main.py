@@ -4,32 +4,33 @@ import sys
 import random
 import asyncio
 import subprocess
+import urllib.request
 import feedparser
 from PIL import Image, ImageDraw, ImageFont
 import edge_tts
 
 SUBREDDIT_NAME = os.getenv("SUBREDDIT", "AskReddit")
-VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")  # Si el post és en espanyol: "es-ES-AlvaroNeural"
+VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
 
-# Llista de vídeos de fons lliures de copyright (Minecraft / GTA)
-BG_VIDEOS = [
-    "https://www.youtube.com/watch?v=n_Dv4JMiwK8",  # Minecraft parkour
-    "https://www.youtube.com/watch?v=qGa9kWREOnE",  # GTA stunt
+# Vídeos de fons directes (sense passar per YouTube per evitar el bloqueig anti-bot)
+# Clips de Minecraft Parkour i GTA a Internet Archive
+BG_VIDEO_URLS = [
+    "https://archive.org/download/minecraft-parkour-gameplay-no-copyright_202302/minecraft-parkour.mp4",
+    "https://archive.org/download/gta-5-stunt-races-gameplay-no-copyright/gta-5-stunt.mp4"
 ]
 
 def get_reddit_post():
-    """Llegeix el subreddit mitjançant RSS públic sense cap API ni registre."""
+    """Llegeix el subreddit mitjançant RSS públic."""
     print(f"📥 Llegint r/{SUBREDDIT_NAME} via RSS públic...")
     url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
     
     feed = feedparser.parse(url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
     
     if not feed.entries:
-        raise Exception(f"No s'han pogut obtenir entrades RSS de r/{SUBREDDIT_NAME}. Comprova el nom.")
+        raise Exception(f"No s'han pogut obtenir entrades RSS de r/{SUBREDDIT_NAME}.")
 
     for entry in feed.entries:
         title = entry.title
-        # Ignorem missatges fixats o massa llargs
         if not title.startswith("[") and 20 < len(title) < 220:
             author_match = re.search(r"/user/([^/]+)", entry.get("author", ""))
             author = author_match.group(1) if author_match else "anònim"
@@ -42,7 +43,6 @@ def get_reddit_post():
                 "url": entry.link
             }
             
-    # Si no en troba cap amb filtre, agafa el primer vàlid
     prime = feed.entries[0]
     return {
         "id": prime.get("id", "post"),
@@ -82,7 +82,7 @@ def create_reddit_card(post, output_path="card.png"):
     # Capçalera
     draw.text((40, 40), f"r/{post['subreddit']}  •  Publicat per u/{post['author']}", fill=(129, 131, 132), font=font_sub)
 
-    # Text del títol en diverses línies
+    # Text del títol adaptat a múltiples línies
     words = post["title"].split()
     lines, current_line = [], []
     for word in words:
@@ -98,26 +98,36 @@ def create_reddit_card(post, output_path="card.png"):
         draw.text((40, y), line, fill=(215, 218, 220), font=font_title)
         y += 46
 
-    # Peu de la targeta
     draw.text((40, height - 60), "⬆️ Post Destacat  •  💬 Comentaris", fill=(129, 131, 132), font=font_sub)
     img.save(output_path)
 
 def download_background(duration, output_path="bg.mp4"):
-    """Descarrega només els segons necessaris del vídeo de fons amb yt-dlp."""
-    print("🎬 Descarregant fragment de fons...")
-    url = random.choice(BG_VIDEOS)
+    """Descarrega el fons directament sense yt-dlp per evitar bloquejos de bots."""
+    print("🎬 Descarregant vídeo de fons directe...")
+    chosen_url = random.choice(BG_VIDEO_URLS)
+    raw_video = "raw_bg.mp4"
+    
+    # Descarreguem el vídeo sencer o fragment inicial amb curl (suporta redireccions)
+    subprocess.run(["curl", "-sL", chosen_url, "-o", raw_video], check=True)
+    
+    # Retallem un fragment a l'atzar amb ffmpeg segons la durada de l'àudio
+    start_time = random.randint(10, 60)
     cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[height<=1080][ext=mp4]/best[ext=mp4]",
-        "--downloader", "ffmpeg",
-        "--downloader-args", f"ffmpeg_i:-ss 45 -t {int(duration) + 2}",
-        "-o", output_path,
-        url
+        "ffmpeg", "-y",
+        "-ss", str(start_time),
+        "-i", raw_video,
+        "-t", str(int(duration) + 2),
+        "-c:v", "copy",
+        "-an",
+        output_path
     ]
     subprocess.run(cmd, check=True)
+    
+    if os.path.exists(raw_video):
+        os.remove(raw_video)
 
 def render_video(duration, output_path="final_video.mp4"):
-    """Munta el vídeo final 9:16 (1080x1920) centrant la targeta sobre el fons."""
+    """Munta el vídeo final 9:16 (1080x1920) amb targeta i àudio."""
     print("🎞️ Renderitzant vídeo vertical amb FFmpeg...")
     filter_complex = (
         "[0:v]crop=ih*(9/16):ih,scale=1080:1920[bg];"

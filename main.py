@@ -5,8 +5,8 @@ import csv
 import random
 import asyncio
 import subprocess
-from PIL import Image, ImageDraw, ImageFont
 import edge_tts
+from playwright.async_api import async_playwright
 
 VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
 
@@ -38,7 +38,7 @@ def get_story_from_csv(csv_path="stories.csv"):
     return selected_story
 
 async def generate_speech_with_word_timestamps(text, audio_path):
-    """Genera veu i timestamps de cada paraula."""
+    """Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula."""
     communicate = edge_tts.Communicate(text, VOICE, boundary="WordBoundary")
     words = []
     
@@ -63,7 +63,6 @@ async def generate_speech_with_word_timestamps(text, audio_path):
     )
     total_dur = float(result.stdout.strip())
 
-    # Fallback si no hi ha metadades de paraules
     if not words and text:
         w_list = text.split()
         if w_list:
@@ -77,139 +76,219 @@ async def generate_speech_with_word_timestamps(text, audio_path):
 
     return total_dur, words
 
-def wrap_text(text, font, max_width, draw):
-    """Ajusta el text perquè no superi l'amplada màxima de la targeta."""
-    words = text.split()
-    lines = []
-    current_line = []
-    for word in words:
-        current_line.append(word)
-        test_str = " ".join(current_line)
-        if draw.textlength(test_str, font=font) > max_width:
-            current_line.pop()
-            if current_line:
-                lines.append(" ".join(current_line))
-            current_line = [word]
-    if current_line:
-        lines.append(" ".join(current_line))
-    return lines
-
-def create_engain_template_card(post, output_path="temp/title_card.png"):
+def build_card_html(post):
     """
-    Dibuixa la targeta d'Engain amb:
-    - Títol gran
-    - Text del post a sota (cos de la publicació)
-    - Botons vectorials nets (zero caràcters trencats [])
-    - Espaiat calculat automàticament
+    Construeix l'HTML clonat al 100% de la plantilla d'Engain:
+    - Font Inter oficial
+    - Icones SVG extretes directament del mockup
+    - Cos de text de la publicació a sota del títol
     """
-    width = 940
-    padding_x = 44
-    padding_y = 36
-    max_text_width = width - (padding_x * 2)
-    
-    try:
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 32)
-        font_body = ImageFont.truetype("DejaVuSans.ttf", 22)
-        font_sub = ImageFont.truetype("DejaVuSans-Bold.ttf", 21)
-        font_meta = ImageFont.truetype("DejaVuSans.ttf", 19)
-        font_pill = ImageFont.truetype("DejaVuSans-Bold.ttf", 19)
-    except:
-        font_title = font_body = font_sub = font_meta = font_pill = ImageFont.load_default()
+    # Agafem el començament de la història per al cos de la publicació
+    story_text = post.get("story", "")
+    preview_words = story_text.split()[:45]
+    story_preview = " ".join(preview_words) + ("..." if len(story_text.split()) > 45 else "")
 
-    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    upvotes = post.get("upvotes", "436")
+    comments = post.get("comments", "57")
+    subreddit = post.get("subreddit", "confessions")
 
-    # 1. Ajustar línies del títol
-    title_lines = wrap_text(post["title"], font_title, max_text_width, dummy_draw)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: transparent;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      display: inline-block;
+      padding: 30px;
+    }}
+    #reddit-card {{
+      background: #ffffff;
+      border-radius: 18px;
+      padding: 20px 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
+      width: 820px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }}
+    .header {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .avatar {{
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #D93900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }}
+    .avatar svg {{
+      width: 22px;
+      height: 22px;
+      fill: #ffffff;
+    }}
+    .meta {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+    }}
+    .subreddit {{
+      font-weight: 700;
+      color: #2E3640;
+    }}
+    .separator {{
+      color: #5C6C74;
+    }}
+    .time {{
+      color: #5C6C74;
+      font-weight: 400;
+    }}
+    .title {{
+      font-size: 22px;
+      line-height: 1.35;
+      font-weight: 700;
+      color: #11151A;
+      letter-spacing: -0.2px;
+    }}
+    .body-text {{
+      font-size: 15px;
+      line-height: 1.5;
+      color: #374151;
+      font-weight: 400;
+    }}
+    .pills-container {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+    }}
+    .pill {{
+      background-color: #E5EBEE;
+      border-radius: 9999px;
+      display: flex;
+      align-items: center;
+      padding: 7px 12px;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #11151A;
+    }}
+    .vote-pill {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+    }}
+    .icon {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .icon svg {{
+      width: 16px;
+      height: 16px;
+    }}
+  </style>
+</head>
+<body>
+  <div id="reddit-card">
+    <div class="header">
+      <div class="avatar">
+        <!-- Snoo Logo Reddit Oficial -->
+        <svg viewBox="0 0 20 20">
+          <path d="M16.67 10a1.46 1.46 0 0 0-2.47-1 6.84 6.84 0 0 0-3.85-1.23L11 4.29l2.15.46a1 1 0 1 0 .22-.72l-2.48-.53a.35.35 0 0 0-.41.27L10 6.6a6.84 6.84 0 0 0-3.87 1.23 1.46 1.46 0 1 0-1.61 2.39 2.87 2.87 0 0 0 0 .78 1.46 1.46 0 0 0 .93 2.14 4.5 4.5 0 0 0 4.55 1.86 4.5 4.5 0 0 0 4.55-1.86 1.46 1.46 0 0 0 .93-2.14 2.87 2.87 0 0 0 0-.78 1.45 1.45 0 0 0 .59-1.33zM7.5 10.75A1 1 0 1 1 8.5 9.75a1 1 0 0 1-1 1zm5.8 2.22a3.3 3.3 0 0 1-3.3 0 .25.25 0 0 1 .25-.43 2.8 2.8 0 0 0 2.8 0 .25.25 0 0 1 .25.43zm-.8-2.22a1 1 0 1 1 1-1 1 1 0 0 1-1 1z"/>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="subreddit">r/{subreddit}</span>
+        <span class="separator">•</span>
+        <span class="time">2 hr. ago</span>
+      </div>
+    </div>
 
-    # 2. Agafar i ajustar les primeres línies del text del post (cos de la confessió)
-    story_raw = post.get("story", "")
-    # Mostrem les primeres 4-5 línies del text a la targeta
-    story_lines = wrap_text(story_raw, font_body, max_text_width, dummy_draw)[:5]
-    if len(story_lines) == 5:
-        story_lines[-1] = story_lines[-1].rstrip("., ") + "..."
+    <div class="title">{post['title']}</div>
 
-    # Calcular alçades exactes
-    title_h = sum(dummy_draw.textbbox((0, 0), l, font=font_title)[3] - dummy_draw.textbbox((0, 0), l, font=font_title)[1] + 10 for l in title_lines)
-    body_h = sum(dummy_draw.textbbox((0, 0), l, font=font_body)[3] - dummy_draw.textbbox((0, 0), l, font=font_body)[1] + 8 for l in story_lines)
+    <div class="body-text">{story_preview}</div>
 
-    header_h = 42
-    pills_h = 44
-    gap = 20
+    <div class="pills-container">
+      <!-- 1. Vots (Icones exactes d'Engain) -->
+      <div class="pill vote-pill">
+        <div class="icon">
+          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 3.5l-6 6h4v7h4v-7h4l-6-6z"/>
+          </svg>
+        </div>
+        <span>{upvotes}</span>
+        <div class="icon">
+          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 16.5l6-6h-4v-7h-4v7h-4l6 6z"/>
+          </svg>
+        </div>
+      </div>
 
-    card_height = padding_y + header_h + gap + title_h + (gap if story_lines else 0) + body_h + gap + pills_h + padding_y
+      <!-- 2. Comentaris (Bafarada exacta de l'HTML) -->
+      <div class="pill">
+        <div class="icon">
+          <svg fill="#11151A" viewBox="0 0 20 20">
+            <path d="M10 1a9 9 0 0 0-9 9c0 1.947.79 3.58 1.935 4.957L.231 17.661A.784.784 0 0 0 .785 19H10a9 9 0 0 0 9-9 9 9 0 0 0-9-9m0 16.2H6.162c-.994.004-1.907.053-3.045.144l-.076-.188a37 37 0 0 0 2.328-2.087l-1.05-1.263C3.297 12.576 2.8 11.331 2.8 10c0-3.97 3.23-7.2 7.2-7.2s7.2 3.23 7.2 7.2-3.23 7.2-7.2 7.2"/>
+          </svg>
+        </div>
+        <span>{comments}</span>
+      </div>
 
-    img = Image.new("RGBA", (width, card_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+      <!-- 3. Award Ribbon (Icona exacta de la Imatge 1) -->
+      <div class="pill">
+        <div class="icon">
+          <svg fill="none" stroke="#11151A" stroke-width="1.8" viewBox="0 0 24 24">
+            <circle cx="12" cy="8" r="6"/>
+            <path d="M15.477 12.89L17 22l-5-3-5 3 1.523-9.11"/>
+          </svg>
+        </div>
+      </div>
 
-    # Fons blanc arrodonit
-    draw.rounded_rectangle([(0, 0), (width, card_height)], radius=24, fill=(255, 255, 255, 255), outline=(225, 230, 234, 255), width=2)
+      <!-- 4. Compartir (Icona de l'HTML) -->
+      <div class="pill">
+        <div class="icon">
+          <svg fill="#11151A" viewBox="0 0 20 20">
+            <path d="m12.8 17.524 6.89-6.887a.9.9 0 0 0 0-1.273L12.8 2.477a1.64 1.64 0 0 0-1.782-.349 1.64 1.64 0 0 0-1.014 1.518v2.593C4.054 6.728 1.192 12.075 1 17.376a1.35 1.35 0 0 0 .862 1.32 1.35 1.35 0 0 0 1.531-.364l.334-.381c1.705-1.944 3.323-3.791 6.277-4.103v2.509c0 .667.398 1.262 1.014 1.518a1.64 1.64 0 0 0 1.783-.349zm-.994-1.548V12h-.9c-3.969 0-6.162 2.1-8.001 4.161.514-4.011 2.823-8.16 8-8.16h.9V4.024L17.784 10z"/>
+          </svg>
+        </div>
+        <span>8</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
 
-    # Capçalera (Avatar + Subreddit + Temps sense xocs de text)
-    curr_y = padding_y
-    avatar_radius = 18
-    draw.ellipse([(padding_x, curr_y), (padding_x + avatar_radius * 2, curr_y + avatar_radius * 2)], fill=(217, 57, 0))
-    draw.text((padding_x + 9, curr_y + 6), "r/", fill=(255, 255, 255), font=font_sub)
+async def render_html_to_card_png(post, output_image_path="temp/title_card.png"):
+    """Renderitza l'HTML clonat a PNG d'alta definició utilitzant Chromium en local."""
+    print("🎨 Renderitzant la targeta des de plantilla HTML idèntica...")
+    html_content = build_card_html(post)
+    html_file = os.path.abspath("temp/card.html")
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
-    sub_x = padding_x + avatar_radius * 2 + 14
-    sub_text = f"r/{post['subreddit']}"
-    draw.text((sub_x, curr_y + 4), sub_text, fill=(46, 54, 64), font=font_sub)
-    
-    sub_w = dummy_draw.textlength(sub_text, font=font_sub)
-    dot_x = sub_x + sub_w + 10
-    draw.text((dot_x, curr_y + 4), "•", fill=(92, 108, 116), font=font_meta)
-    
-    time_x = dot_x + dummy_draw.textlength("•", font=font_meta) + 10
-    draw.text((time_x, curr_y + 5), "2 hr. ago", fill=(92, 108, 116), font=font_meta)
-
-    # Dibuixar el Títol
-    curr_y += header_h + gap
-    for line in title_lines:
-        draw.text((padding_x, curr_y), line, fill=(17, 21, 26), font=font_title)
-        bbox = dummy_draw.textbbox((0, 0), line, font=font_title)
-        curr_y += (bbox[3] - bbox[1]) + 10
-
-    # Dibuixar el Cos de la Publicació (Text del post)
-    if story_lines:
-        curr_y += 6
-        for line in story_lines:
-            draw.text((padding_x, curr_y), line, fill=(60, 72, 82), font=font_body)
-            bbox = dummy_draw.textbbox((0, 0), line, font=font_body)
-            curr_y += (bbox[3] - bbox[1]) + 8
-
-    # Botons inferiors (Pills amb icones vectorials pures)
-    curr_y += gap
-    
-    # 1. Pill Vots (Taronja #D93900)
-    vote_w = 175
-    draw.rounded_rectangle([(padding_x, curr_y), (padding_x + vote_w, curr_y + pills_h)], radius=22, fill=(217, 57, 0))
-    # Triangle fletxa amunt
-    draw.polygon([(padding_x + 22, curr_y + 16), (padding_x + 16, curr_y + 26), (padding_x + 28, curr_y + 26)], fill=(255, 255, 255))
-    # Text vots
-    draw.text((padding_x + 40, curr_y + 11), post.get("upvotes", "42.8k"), fill=(255, 255, 255), font=font_pill)
-    # Triangle fletxa avall
-    draw.polygon([(padding_x + vote_w - 22, curr_y + 26), (padding_x + vote_w - 28, curr_y + 16), (padding_x + vote_w - 16, curr_y + 16)], fill=(255, 255, 255))
-
-    # 2. Pill Comentaris (Gris #E5EBEE)
-    com_x = padding_x + vote_w + 14
-    com_w = 125
-    draw.rounded_rectangle([(com_x, curr_y), (com_x + com_w, curr_y + pills_h)], radius=22, fill=(229, 235, 238))
-    # Vector bafarada de xat (zero emojis trencats [])
-    bx, by = com_x + 18, curr_y + 15
-    draw.rounded_rectangle([(bx, by), (bx + 16, by + 12)], radius=3, fill=(17, 21, 26))
-    draw.polygon([(bx + 3, by + 12), (bx + 3, by + 16), (bx + 8, by + 12)], fill=(17, 21, 26))
-    draw.text((com_x + 48, curr_y + 11), post.get("comments", "3.2k"), fill=(17, 21, 26), font=font_pill)
-
-    # 3. Pill Compartir (Gris #E5EBEE)
-    share_x = com_x + com_w + 14
-    share_w = 120
-    draw.rounded_rectangle([(share_x, curr_y), (share_x + share_w, curr_y + pills_h)], radius=22, fill=(229, 235, 238))
-    # Vector fletxa compartir
-    sx, sy = share_x + 18, curr_y + 16
-    draw.line([(sx, sy + 12), (sx + 10, sy + 2)], fill=(17, 21, 26), width=3)
-    draw.polygon([(sx + 12, sy), (sx + 4, sy), (sx + 12, sy + 8)], fill=(17, 21, 26))
-    draw.text((share_x + 46, curr_y + 11), "Share", fill=(17, 21, 26), font=font_pill)
-
-    img.save(output_path)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        # Scale factor 2 per a màxima nitidesa Retina
+        page = await browser.new_page(viewport={"width": 1200, "height": 900}, device_scale_factor=2)
+        await page.goto(f"file://{html_file}")
+        
+        # Capturem directament l'element de la targeta amb fons transparent
+        card_el = page.locator("#reddit-card")
+        await card_el.screenshot(path=output_image_path, omit_background=True)
+        await browser.close()
 
 def format_ass_time(seconds):
     """Format de temps per a subtítols ASS: H:MM:SS.cs"""
@@ -226,7 +305,6 @@ def generate_single_word_subtitles(words_list, output_path="temp/captions.ass"):
     Subtítols TikTok D'UNA SOLA PARAULA AL CENTRE (1 by 1):
     - Format gran (84pt), majúscules, negreta.
     - Color groc elèctric (&H0000FFFF&) amb vora negra de 8px.
-    - Suavitzat entre paraules per evitar parpelleig.
     """
     ass_header = """[Script Info]
 ScriptType: v4.00+
@@ -236,7 +314,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,DejaVu Sans,84,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,2,0,1,8,2,5,80,80,80,1
+Style: TikTok,DejaVu Sans,84,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,8,2,5,80,80,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -252,7 +330,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start_sec = item["start"]
         end_sec = item["end"]
         
-        # Allargar lleugerament si la següent paraula comença immediatament (evita parpelleig)
+        # Suavitzat entre paraules per evitar parpelleig
         if i + 1 < len(words_list) and (words_list[i+1]["start"] - end_sec) < 0.25:
             end_sec = words_list[i+1]["start"]
 
@@ -281,13 +359,13 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
     
-    # 1. Targeta inicial amb títol + text de la publicació
+    # 1. Targeta inicial: renderitzada des de l'HTML 100% idèntic
     print("🗣️ Generating speech for Title...")
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
     
     title_card = os.path.abspath("temp/title_card.png")
-    create_engain_template_card(story_data, title_card)
+    await render_html_to_card_png(story_data, title_card)
 
     # 2. Història amb subtítols d'1 sola paraula
     print("🗣️ Generating speech for Story...")

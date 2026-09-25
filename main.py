@@ -1,85 +1,50 @@
 import os
 import re
 import sys
+import csv
 import random
 import asyncio
 import subprocess
-import requests
-import feedparser
 from PIL import Image, ImageDraw, ImageFont
 import edge_tts
 
-# Configuració
-SUBREDDIT_NAME = os.getenv("SUBREDDIT", "AskReddit")
 VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
-TARGET_TOTAL_DURATION = 55  # Durada màxima recomanada
 
-def get_reddit_thread_with_comments():
-    """Obté el títol i els comentaris en anglès."""
-    print(f"📥 Fetching top thread and comments from r/{SUBREDDIT_NAME}...")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    
-    rss_url = f"https://www.reddit.com/r/{SUBREDDIT_NAME}/hot.rss"
-    feed = feedparser.parse(rss_url, agent=headers["User-Agent"])
-    
-    blocked_keywords = ["moderator", "looking for", "rules", "megathread", "weekly thread", "discord"]
-    selected_entry = None
-    
-    for entry in feed.entries:
-        title = entry.title.strip()
-        if not any(kw in title.lower() for kw in blocked_keywords) and 25 < len(title) < 200:
-            selected_entry = entry
-            break
-            
-    if not selected_entry:
-        selected_entry = feed.entries[1] if len(feed.entries) > 1 else feed.entries[0]
+def get_story_from_csv(csv_path="stories.csv"):
+    """Llegeix la primera història pendent del CSV i la marca com a feta."""
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"No s'ha trobat el fitxer {csv_path}. Assegura't de pujar-lo al repositori.")
 
-    post_url = selected_entry.link
-    author_match = re.search(r"/user/([^/]+)", selected_entry.get("author", ""))
-    post_author = author_match.group(1) if author_match else "RedditUser"
+    rows = []
+    selected_story = None
 
-    json_url = post_url.rstrip("/") + ".json"
-    comments = []
-    
-    try:
-        res = requests.get(json_url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            comment_children = data[1]["data"]["children"]
-            for child in comment_children:
-                c_data = child.get("data", {})
-                body = c_data.get("body", "").strip()
-                author = c_data.get("author", "anonymous")
-                
-                if body and body != "[deleted]" and body != "[removed]" and 30 < len(body) < 320:
-                    clean_body = re.sub(r'http\S+', '', body)
-                    # Netejar salts de línia estranys per a una narració fluida
-                    clean_body = " ".join(clean_body.split())
-                    comments.append({"author": author, "body": clean_body})
-                if len(comments) >= 4:
-                    break
-    except Exception as e:
-        print(f"⚠️ Could not fetch comments via JSON ({e}), using fallback comments.")
+    with open(csv_path, mode="r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        for row in reader:
+            if not selected_story and row.get("status", "pending") == "pending":
+                selected_story = row
+                row["status"] = "done"  # Marquem com a utilitzada
+            rows.append(row)
 
-    if not comments:
-        comments = [
-            {"author": "CuriousThinker", "body": "Honestly, the hardest part is realizing that nobody is coming to save you. You have to build the life you want yourself."},
-            {"author": "LifeTraveler", "body": "Most people are not thinking about you as much as you think they are. Everyone is busy dealing with their own problems."},
-            {"author": "RealistView", "body": "Time goes by way faster than you expect once your routine sets in. Cherish the quiet moments."}
-        ]
+    if not selected_story:
+        # Si totes estan fetes, agafa la primera com a fallback
+        selected_story = rows[0]
 
-    return {
-        "title": selected_entry.title.strip(),
-        "author": post_author,
-        "subreddit": SUBREDDIT_NAME,
-        "comments": comments
-    }
+    # Guardar l'estat actualitzat
+    with open(csv_path, mode="w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return selected_story
 
 async def generate_speech_with_word_timestamps(text, audio_path):
-    """Genera l'àudio TTS i extreu els mil·lisegons exactes de cada paraula."""
-    communicate = edge_tts.Communicate(text, VOICE)
+    """
+    Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula.
+    IMPORTANT: boundary='WordBoundary' és imprescindible per rebre els timestamps!
+    """
+    communicate = edge_tts.Communicate(text, VOICE, boundary="WordBoundary")
     words = []
     
     with open(audio_path, "wb") as f:
@@ -87,7 +52,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
             if chunk["type"] == "audio":
                 f.write(chunk["data"])
             elif chunk["type"] == "WordBoundary":
-                # L'offset i la durada vénen en unitats de 100ns (ticks)
+                # offset i durada vénen en ticks (10,000,000 ticks = 1 segon)
                 start_sec = chunk["offset"] / 10_000_000
                 dur_sec = chunk["duration"] / 10_000_000
                 words.append({
@@ -95,7 +60,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                     "start": start_sec,
                     "end": start_sec + dur_sec
                 })
-                
+
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
         stdout=subprocess.PIPE,
@@ -103,26 +68,47 @@ async def generate_speech_with_word_timestamps(text, audio_path):
         text=True
     )
     total_dur = float(result.stdout.strip())
+
+    # Sistema de seguretat infal·lible: si la xarxa no ha retornat metadades, calculem el ritme
+    if not words and text:
+        print("⚠️ Warning: Estimant timestamps de paraules pel ritme d'àudio...")
+        w_list = text.split()
+        if w_list:
+            step = total_dur / len(w_list)
+            for idx, w in enumerate(w_list):
+                words.append({
+                    "word": w,
+                    "start": idx * step,
+                    "end": (idx + 1) * step
+                })
+
     return total_dur, words
 
-def create_title_card(author, text, subreddit, output_path="temp/title_card.png"):
-    """Dibuixa la targeta del post (que només es veurà durant el títol)."""
-    width = 900
-    padding_x = 42
-    padding_y = 32
+def create_engain_template_card(post, output_path="temp/title_card.png"):
+    """
+    Dibuixa la targeta exacta del disseny d'Engain (Reddit Post Template):
+    - Fons blanc net amb cantonades arrodonides grans (rounded-2xl).
+    - Avatar circular taronja de Reddit.
+    - Botons en càpsula: Taronja oficial (#D93900) per a vots i gris (#E5EBEE) per a comentaris i compartir.
+    """
+    width = 920
+    padding_x = 44
+    padding_y = 36
     
     try:
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 32)
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
+        font_sub = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
         font_meta = ImageFont.truetype("DejaVuSans.ttf", 20)
-        font_meta_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+        font_pill = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
     except:
-        font_title = font_meta = font_meta_bold = ImageFont.load_default()
+        font_title = font_sub = font_meta = font_pill = ImageFont.load_default()
 
-    words = text.split()
+    # Ajust automàtic de línies per al títol
+    words = post["title"].split()
     lines, current_line = [], []
     for word in words:
         current_line.append(word)
-        if len(" ".join(current_line)) > 40:
+        if len(" ".join(current_line)) > 38:
             lines.append(" ".join(current_line))
             current_line = []
     if current_line:
@@ -135,50 +121,87 @@ def create_title_card(author, text, subreddit, output_path="temp/title_card.png"
         bbox = dummy_draw.textbbox((0, 0), line, font=font_title)
         h = bbox[3] - bbox[1]
         line_heights.append(h)
-        total_text_h += h + 10
-    total_text_h -= 10
+        total_text_h += h + 12
+    total_text_h -= 12
 
-    card_height = padding_y + 40 + 22 + total_text_h + 22 + 30 + padding_y
+    card_height = padding_y + 44 + 20 + total_text_h + 26 + 48 + padding_y
 
     img = Image.new("RGBA", (width, card_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Fons fosc i vora
-    draw.rounded_rectangle([(0, 0), (width, card_height)], radius=18, fill=(26, 26, 27, 250), outline=(52, 53, 54, 255), width=2)
+    # 1. Targeta blanca amb cantonades arrodonides i subtil ombra/vora
+    draw.rounded_rectangle(
+        [(0, 0), (width, card_height)],
+        radius=24,
+        fill=(255, 255, 255, 255),
+        outline=(230, 235, 238, 255),
+        width=2
+    )
 
-    # Insígnia r/ i autor
-    badge_radius = 16
-    draw.ellipse([(padding_x, padding_y), (padding_x + badge_radius * 2, padding_y + badge_radius * 2)], fill=(255, 69, 0))
-    draw.text((padding_x + 9, padding_y + 4), "r/", fill=(255, 255, 255), font=font_meta_bold)
-    draw.text((padding_x + badge_radius * 2 + 14, padding_y + 6), f"r/{subreddit}  •  Posted by u/{author}  •  Today", fill=(138, 141, 143), font=font_meta)
+    # 2. Capçalera (Avatar Snoo taronja + Subreddit + Temps)
+    curr_y = padding_y
+    avatar_radius = 20
+    draw.ellipse(
+        [(padding_x, curr_y), (padding_x + avatar_radius * 2, curr_y + avatar_radius * 2)],
+        fill=(217, 57, 0)
+    )
+    # Silueta Snoo / Text r/
+    draw.text((padding_x + 11, curr_y + 8), "r/", fill=(255, 255, 255), font=font_sub)
 
-    # Títol
-    y = padding_y + 40 + 22
+    sub_x = padding_x + avatar_radius * 2 + 14
+    draw.text((sub_x, curr_y + 2), f"r/{post['subreddit']}", fill=(46, 54, 64), font=font_sub)
+    draw.text((sub_x + 160, curr_y + 4), "•", fill=(92, 108, 116), font=font_meta)
+    draw.text((sub_x + 180, curr_y + 4), "2 hr. ago", fill=(92, 108, 116), font=font_meta)
+
+    # 3. Títol
+    curr_y += 44 + 20
     for i, line in enumerate(lines):
-        draw.text((padding_x, y), line, fill=(240, 242, 243), font=font_title)
-        y += line_heights[i] + 10
+        draw.text((padding_x, curr_y), line, fill=(17, 21, 26), font=font_title)
+        curr_y += line_heights[i] + 12
 
-    # Peu de la targeta
-    y += 14
-    draw.text((padding_x, y), "💬 Discussion   ↗ Share   ⬆️ Vote", fill=(138, 141, 143), font=font_meta)
+    # 4. Botons inferiors d'Engain (Pills)
+    curr_y += 18
+    pill_h = 44
+    
+    # Pill 1: Vots en Taronja (#D93900)
+    vote_w = 170
+    draw.rounded_rectangle([(padding_x, curr_y), (padding_x + vote_w, curr_y + pill_h)], radius=22, fill=(217, 57, 0))
+    draw.text((padding_x + 16, curr_y + 11), "▲", fill=(255, 255, 255), font=font_pill)
+    draw.text((padding_x + 46, curr_y + 10), post.get("upvotes", "436"), fill=(255, 255, 255), font=font_pill)
+    draw.text((padding_x + vote_w - 32, curr_y + 11), "▼", fill=(255, 255, 255), font=font_pill)
+
+    # Pill 2: Comentaris en Gris (#E5EBEE)
+    com_x = padding_x + vote_w + 14
+    com_w = 120
+    draw.rounded_rectangle([(com_x, curr_y), (com_x + com_w, curr_y + pill_h)], radius=22, fill=(229, 235, 238))
+    draw.text((com_x + 16, curr_y + 10), "💬", fill=(0, 0, 0), font=font_pill)
+    draw.text((com_x + 50, curr_y + 10), post.get("comments", "57"), fill=(17, 21, 26), font=font_pill)
+
+    # Pill 3: Compartir en Gris (#E5EBEE)
+    share_x = com_x + com_w + 14
+    share_w = 110
+    draw.rounded_rectangle([(share_x, curr_y), (share_x + share_w, curr_y + pill_h)], radius=22, fill=(229, 235, 238))
+    draw.text((share_x + 16, curr_y + 10), "↗", fill=(0, 0, 0), font=font_pill)
+    draw.text((share_x + 46, curr_y + 10), "Share", fill=(17, 21, 26), font=font_pill)
+
     img.save(output_path)
 
 def format_ass_time(seconds):
-    """Converteix segons al format H:MM:SS.cs necessari per al fitxer ASS."""
+    """Format de temps per a subtítols ASS: H:MM:SS.cs"""
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     centis = int(round((seconds - int(seconds)) * 100))
-    if centis == 100:
+    if centis >= 100:
         centis = 99
     return f"{hrs}:{mins:02d}:{secs:02d}.{centis:02d}"
 
 def generate_tiktok_ass_subtitles(words_list, output_path="temp/captions.ass"):
     """
-    Genera subtítols ASS d'estil TikTok / MrBeast:
-    - Text gran, negreta, centrat al mig de la pantalla.
-    - S'agrupen de 3 en 3 paraules.
-    - La paraula que s'està pronunciant es pinta en GROC brillant (&H0000FFFF&).
+    Genera subtítols animats TikTok / MrBeast:
+    - Text gran, majúscules, centrat al mig exacte (Alignment 5).
+    - Agrupats de 3 en 3 paraules.
+    - La paraula activa es pinta en GROC BRILLANT (&H0000FFFF&) amb vora negra gruixuda.
     """
     ass_header = """[Script Info]
 ScriptType: v4.00+
@@ -188,31 +211,27 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,DejaVu Sans,68,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,0,5,80,80,80,1
+Style: TikTok,DejaVu Sans,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,7,2,5,80,80,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     dialogues = []
-    
-    # Agrupar les paraules en blocs de 3 paraules
     chunk_size = 3
+    
     for i in range(0, len(words_list), chunk_size):
         chunk = words_list[i:i + chunk_size]
-        
-        # Per a cada paraula dins del bloc, es crea una línia activa
         for active_idx, target_word in enumerate(chunk):
             start_t = format_ass_time(target_word["start"])
             end_t = format_ass_time(target_word["end"])
             
-            # Construir la frase on la paraula activa és groga i les altres blanques
             phrase_parts = []
             for j, w in enumerate(chunk):
-                cleaned_word = w["word"].upper().strip()
+                cleaned = w["word"].upper().strip()
                 if j == active_idx:
-                    phrase_parts.append(r"{\c&H0000FFFF&}" + cleaned_word + r"{\c&H00FFFFFF&}")
+                    phrase_parts.append(r"{\c&H0000FFFF&}" + cleaned + r"{\c&H00FFFFFF&}")
                 else:
-                    phrase_parts.append(cleaned_word)
+                    phrase_parts.append(cleaned)
                     
             line_text = " ".join(phrase_parts)
             dialogues.append(f"Dialogue: 0,{start_t},{end_t},TikTok,,0,0,0,,{line_text}")
@@ -221,96 +240,82 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write(ass_header + "\n".join(dialogues) + "\n")
 
 def find_local_background():
-    """Busca el teu background.mp4 al repo."""
-    for fitxer in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
-        if os.path.exists(fitxer):
-            return fitxer
-    for fitxer in os.listdir("."):
-        if fitxer.lower().endswith(".mp4") and fitxer not in ["final_video.mp4", "bg.mp4"]:
-            return fitxer
+    """Busca background.mp4 al repo."""
+    for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
+        if os.path.exists(f):
+            return f
+    for f in os.listdir("."):
+        if f.lower().endswith(".mp4") and f not in ["final_video.mp4", "bg.mp4"]:
+            return f
     return None
 
 async def main():
-    thread = get_reddit_thread_with_comments()
-    print(f"\n📌 Post: {thread['title']}")
-    
     os.makedirs("temp", exist_ok=True)
     
-    # 1. GENERAR EL TÍTOL (Només àudio i targeta, sense subtítols)
-    print("🗣️ Generating Title audio...")
+    story_data = get_story_from_csv("stories.csv")
+    print(f"\n📖 Loaded Story #{story_data.get('id', '1')} from CSV: {story_data['title']}")
+    
+    # 1. GENERAR ÀUDIO I TARGETA DEL TÍTOL (0 a title_dur)
+    print("🗣️ Generating speech for Title...")
     title_audio = os.path.abspath("temp/title.mp3")
-    title_dur, _ = await generate_speech_with_word_timestamps(thread["title"], title_audio)
+    title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
     
     title_card = os.path.abspath("temp/title_card.png")
-    create_title_card(thread["author"], thread["title"], thread["subreddit"], title_card)
+    create_engain_template_card(story_data, title_card)
+
+    # 2. GENERAR ÀUDIO I SUBTÍTOLS DE LA HISTÒRIA COMPLETA (> 1.5 min)
+    print("🗣️ Generating speech and word timestamps for the full Story...")
+    story_audio = os.path.abspath("temp/story.mp3")
+    story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
     
-    audio_files = [title_audio]
-    all_comment_words = []
-    current_time_offset = title_dur
+    # Desplacem els subtítols perquè comencin EXACTAMENT quan s'acaba el títol
+    adjusted_words = []
+    for w in story_words:
+        adjusted_words.append({
+            "word": w["word"],
+            "start": w["start"] + title_dur,
+            "end": w["end"] + title_dur
+        })
 
-    # 2. GENERAR ELS COMENTARIS (Àudio + timestamps per paraula)
-    for idx, c in enumerate(thread["comments"]):
-        if current_time_offset >= TARGET_TOTAL_DURATION:
-            break
-            
-        print(f"🗣️ Generating Comment {idx + 1} (u/{c['author']})...")
-        c_audio = os.path.abspath(f"temp/c_{idx}.mp3")
-        c_dur, words = await generate_speech_with_word_timestamps(c["body"], c_audio)
-        
-        # Desplaçar els temps de les paraules perquè comencin després del títol
-        for w in words:
-            all_comment_words.append({
-                "word": w["word"],
-                "start": w["start"] + current_time_offset,
-                "end": w["end"] + current_time_offset
-            })
-            
-        audio_files.append(c_audio)
-        current_time_offset += c_dur
+    total_video_duration = title_dur + story_dur
+    print(f"\n⏱️ Durada total del vídeo: {total_video_duration:.1f} segons ({(total_video_duration/60):.2f} minuts)")
+    print(f"📝 Total paraules animades: {len(adjusted_words)}")
 
-    total_video_duration = current_time_offset
-    print(f"\n⏱️ Total video duration: {total_video_duration:.1f}s")
-    print(f"📝 Total animated words for comments: {len(all_comment_words)}")
-
-    # 3. Concatenar tots els fitxers d'àudio
+    # 3. Concatenar àudio del títol + història
     list_path = os.path.abspath("temp/audio_list.txt")
     full_audio = os.path.abspath("temp/full_audio.mp3")
     with open(list_path, "w") as f:
-        for a_file in audio_files:
-            f.write(f"file '{a_file}'\n")
+        f.write(f"file '{title_audio}'\n")
+        f.write(f"file '{story_audio}'\n")
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
 
-    # 4. Generar el fitxer de subtítols animats (.ass)
+    # 4. Generar el fitxer ASS de subtítols
     ass_path = os.path.abspath("temp/captions.ass")
-    generate_tiktok_ass_subtitles(all_comment_words, ass_path)
+    generate_tiktok_ass_subtitles(adjusted_words, ass_path)
 
-    # 5. Preparar el fons de vídeo
+    # 5. Vídeo de fons (Minecraft)
     bg_file = find_local_background()
     temp_bg = os.path.abspath("temp/bg.mp4")
     if bg_file:
-        print(f"📁 Using local background: {bg_file}")
-        start_time = random.randint(0, 30)
+        print(f"📁 Using background: {bg_file}")
+        start_time = random.randint(0, 20)
         subprocess.run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-ss", str(start_time),
             "-i", bg_file, "-t", str(int(total_video_duration) + 2),
             "-c:v", "libx264", "-an", temp_bg
         ], check=True)
     else:
-        print("⚠️ No local background found. Generating studio color background...")
         subprocess.run([
             "ffmpeg", "-y", "-f", "lavfi",
             "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={int(total_video_duration) + 2}",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 6. MUNTATGE FINAL AMB FFMPEG:
-    # - El vídeo de fons es retalla a vertical (1080x1920)
-    # - La targeta del títol només és visible entre 0 i title_dur
-    # - Els subtítols animats s'estampen sobre el vídeo
-    print("🎞️ Assembling final video with title card and animated word captions...")
-    
-    # Escapar la ruta per al filtre de subtítols de FFmpeg
+    # 6. Muntatge Final:
+    # - La targeta només apareix de t=0 a t=title_dur
+    # - Els subtítols animats apareixen al centre quan la targeta desapareix
+    print("🎞️ Rendering final video with Title Card and Center Animated Captions...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (

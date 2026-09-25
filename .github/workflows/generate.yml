@@ -2,14 +2,9 @@ name: Generar Video Reddit
 
 on:
   workflow_dispatch:
-    inputs:
-      subreddit:
-        description: 'Subreddit des d’on agafar el post'
-        required: false
-        default: 'AskReddit'
 
 permissions:
-  contents: write # Permís per crear la Release sense tokens externs
+  contents: write
 
 jobs:
   build:
@@ -18,6 +13,8 @@ jobs:
     steps:
       - name: Baixar repositori
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -32,9 +29,10 @@ jobs:
       - name: Instal·lar dependències Python
         run: pip install -r requirements.txt
 
+      - name: Instal·lar Chromium per a Playwright
+        run: playwright install --with-deps chromium
+
       - name: Generar Vídeo
-        env:
-          SUBREDDIT: ${{ github.event.inputs.subreddit || 'AskReddit' }}
         run: python main.py
 
       - name: Publicar vídeo a GitHub Release
@@ -45,7 +43,6 @@ jobs:
           TAG="video-$(date +'%Y%m%d-%H%M%S')"
           gh release create "$TAG" final_video.mp4 --title "Vídeo Reddit - $TAG" --notes "Vídeo generat automàticament."
           
-          # Generar URL directa de descàrrega
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/$TAG/final_video.mp4"
           RELEASE_PAGE="https://github.com/${{ github.repository }}/releases/tag/$TAG"
           
@@ -56,15 +53,9 @@ jobs:
         run: |
           echo "======================================================================"
           echo "🎉 VÍDEO DISPONIBLE PER DESCARREGAR!"
-          echo ""
-          echo "🔗 ENLLAÇ DIRECTE AL FITXER .MP4:"
           echo "${{ env.DOWNLOAD_URL }}"
-          echo ""
-          echo "📦 PÀGINA DE LA RELEASE:"
-          echo "${{ env.RELEASE_PAGE }}"
           echo "======================================================================"
 
-          # Afegir també l'enllaç a la pestanya 'Summary' de GitHub Actions
           echo "## 🎬 Vídeo generat amb èxit!" >> $GITHUB_STEP_SUMMARY
-          echo "[👉 Fes clic aquí per descarregar el vídeo (${{ env.DOWNLOAD_URL }})](${{ env.DOWNLOAD_URL }})" >> $GITHUB_STEP_SUMMARY
+          echo "[👉 Fes clic aquí per descarregar el vídeo](${{ env.DOWNLOAD_URL }})" >> $GITHUB_STEP_SUMMARY
           echo "[📦 Veure la Release a GitHub](${{ env.RELEASE_PAGE }})" >> $GITHUB_STEP_SUMMARY

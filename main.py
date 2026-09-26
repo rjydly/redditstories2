@@ -8,7 +8,10 @@ import subprocess
 import edge_tts
 from playwright.async_api import async_playwright
 
-VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
+# Configuració de la Veu (Noia jove, to agut i velocitat ràpida per a TikTok)
+VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")  # Veu de noia jove expressiva
+VOICE_RATE = os.getenv("TTS_RATE", "+35%")          # Acceleració (+35% a +45% és el punt d'or)
+VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")       # To agut (+10Hz a +15Hz)
 
 def get_story_from_csv(csv_path="stories.csv"):
     """Llegeix la primera història pendent del CSV."""
@@ -38,8 +41,14 @@ def get_story_from_csv(csv_path="stories.csv"):
     return selected_story
 
 async def generate_speech_with_word_timestamps(text, audio_path):
-    """Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula."""
-    communicate = edge_tts.Communicate(text, VOICE, boundary="WordBoundary")
+    """Genera àudio amb la veu accelerada i aguda, i extreu timestamps exactes."""
+    communicate = edge_tts.Communicate(
+        text,
+        VOICE,
+        rate=VOICE_RATE,
+        pitch=VOICE_PITCH,
+        boundary="WordBoundary"
+    )
     words = []
     
     with open(audio_path, "wb") as f:
@@ -347,6 +356,7 @@ async def main():
     
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
+    print(f"🎙️ Veu: {VOICE} | Velocitat: {VOICE_RATE} | To: {VOICE_PITCH}")
     
     # 1. Targeta inicial
     print("🗣️ Generating speech for Title...")
@@ -356,8 +366,8 @@ async def main():
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Història amb subtítols Pop-In
-    print("🗣️ Generating speech for Story...")
+    # 2. Història amb subtítols Pop-In accelerats
+    print("🗣️ Generating fast speech for Story...")
     story_audio = os.path.abspath("temp/story.mp3")
     story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
     
@@ -370,7 +380,7 @@ async def main():
         })
 
     total_video_duration = title_dur + story_dur
-    print(f"\n⏱️ Durada total: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
+    print(f"\n⏱️ Durada total amb ritme ràpid: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
 
     # 3. Concatenar àudios
     list_path = os.path.abspath("temp/audio_list.txt")
@@ -403,8 +413,8 @@ async def main():
             "-c:v", "libx264", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 6. Muntatge corregit: escala la targeta a 920px per deixar 80px de marge a cada costat
-    print("🎞️ Rendering final video with fitted card and Pop-In captions...")
+    # 6. Muntatge amb targeta escalada a 920px (sense retalls) i subtítols sincronitzats
+    print("🎞️ Rendering final video with fast voice and Pop-In captions...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (

@@ -8,10 +8,9 @@ import subprocess
 import edge_tts
 from playwright.async_api import async_playwright
 
-# Configuració de la Veu (Noia jove, to agut i velocitat ràpida per a TikTok)
-VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")  # Veu de noia jove expressiva
-VOICE_RATE = os.getenv("TTS_RATE", "+35%")          # Acceleració (+35% a +45% és el punt d'or)
-VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")       # To agut (+10Hz a +15Hz)
+VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+VOICE_RATE = os.getenv("TTS_RATE", "+35%")
+VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
 
 def get_story_from_csv(csv_path="stories.csv"):
     """Llegeix la primera història pendent del CSV."""
@@ -41,7 +40,7 @@ def get_story_from_csv(csv_path="stories.csv"):
     return selected_story
 
 async def generate_speech_with_word_timestamps(text, audio_path):
-    """Genera àudio amb la veu accelerada i aguda, i extreu timestamps exactes."""
+    """Genera àudio i timestamps de cada paraula."""
     communicate = edge_tts.Communicate(
         text,
         VOICE,
@@ -58,8 +57,23 @@ async def generate_speech_with_word_timestamps(text, audio_path):
             elif chunk["type"] == "WordBoundary":
                 start_sec = chunk["offset"] / 10_000_000
                 dur_sec = chunk["duration"] / 10_000_000
+                raw_token = chunk["text"].strip()
+                
+                # Desglossar paraules compostes amb guió (ex: 22-year-old -> 22, year, old)
+                if "-" in raw_token and len(raw_token) > 5:
+                    parts = [p for p in raw_token.split("-") if p]
+                    if parts:
+                        sub_dur = dur_sec / len(parts)
+                        for idx, p in enumerate(parts):
+                            words.append({
+                                "word": p,
+                                "start": start_sec + (idx * sub_dur),
+                                "end": start_sec + ((idx + 1) * sub_dur)
+                            })
+                        continue
+
                 words.append({
-                    "word": chunk["text"],
+                    "word": raw_token,
                     "start": start_sec,
                     "end": start_sec + dur_sec
                 })
@@ -86,13 +100,19 @@ async def generate_speech_with_word_timestamps(text, audio_path):
     return total_dur, words
 
 def build_card_html(post):
-    """Construeix l'HTML clonat al 100% de la plantilla d'Engain."""
+    """
+    Construeix la targeta en format QUADRAT (ratio ~1:1):
+    - Text del títol molt gran i prominent (34px)
+    - Preview molt curt del text (2-3 línies) amb '...'
+    - Botons i elements engrandits per a pantalla vertical de mòbil
+    """
     story_text = post.get("story", "")
-    preview_words = story_text.split()[:45]
-    story_preview = " ".join(preview_words) + ("..." if len(story_text.split()) > 45 else "")
+    # Només 22 paraules per deixar espai a un format quadrat
+    preview_words = story_text.split()[:22]
+    story_preview = " ".join(preview_words) + "..."
 
-    upvotes = post.get("upvotes", "436")
-    comments = post.get("comments", "57")
+    upvotes = post.get("upvotes", "42.8k")
+    comments = post.get("comments", "3.2k")
     subreddit = post.get("subreddit", "confessions")
 
     return f"""<!DOCTYPE html>
@@ -101,7 +121,7 @@ def build_card_html(post):
   <meta charset="utf-8">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -110,24 +130,25 @@ def build_card_html(post):
       display: inline-block;
       padding: 30px;
     }}
+    /* Targeta d'estil quadrat (1:1 ratio) */
     #reddit-card {{
       background: #ffffff;
-      border-radius: 20px;
-      padding: 22px 26px;
-      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
-      width: 840px;
+      border-radius: 28px;
+      padding: 34px 38px;
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
+      width: 760px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 16px;
     }}
     .header {{
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
     }}
     .avatar {{
-      width: 38px;
-      height: 38px;
+      width: 44px;
+      height: 44px;
       border-radius: 50%;
       background: #D93900;
       display: flex;
@@ -136,15 +157,15 @@ def build_card_html(post):
       flex-shrink: 0;
     }}
     .avatar svg {{
-      width: 24px;
-      height: 24px;
+      width: 28px;
+      height: 28px;
       fill: #ffffff;
     }}
     .meta {{
       display: flex;
       align-items: center;
-      gap: 6px;
-      font-size: 15px;
+      gap: 8px;
+      font-size: 17px;
     }}
     .subreddit {{
       font-weight: 700;
@@ -157,41 +178,43 @@ def build_card_html(post):
       color: #5C6C74;
       font-weight: 400;
     }}
+    /* Títol gran i impactant */
     .title {{
-      font-size: 23px;
-      line-height: 1.35;
-      font-weight: 700;
+      font-size: 33px;
+      line-height: 1.32;
+      font-weight: 800;
       color: #11151A;
-      letter-spacing: -0.2px;
+      letter-spacing: -0.4px;
     }}
+    /* Text del post clar i concís */
     .body-text {{
-      font-size: 15px;
-      line-height: 1.5;
-      color: #374151;
+      font-size: 21px;
+      line-height: 1.48;
+      color: #4B5563;
       font-weight: 400;
     }}
     .pills-container {{
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-top: 4px;
+      gap: 10px;
+      margin-top: 6px;
     }}
     .pill {{
       background-color: #E5EBEE;
       border-radius: 9999px;
       display: flex;
       align-items: center;
-      padding: 7px 13px;
-      gap: 7px;
-      font-size: 13px;
-      font-weight: 600;
+      padding: 9px 16px;
+      gap: 8px;
+      font-size: 16px;
+      font-weight: 700;
       color: #11151A;
     }}
     .vote-pill {{
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 7px 13px;
+      gap: 10px;
+      padding: 9px 16px;
     }}
     .icon {{
       display: flex;
@@ -199,8 +222,8 @@ def build_card_html(post):
       justify-content: center;
     }}
     .icon svg {{
-      width: 16px;
-      height: 16px;
+      width: 19px;
+      height: 19px;
     }}
   </style>
 </head>
@@ -225,13 +248,13 @@ def build_card_html(post):
     <div class="pills-container">
       <div class="pill vote-pill">
         <div class="icon">
-          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="1.8">
+          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M10 3.5l-6 6h4v7h4v-7h4l-6-6z"/>
           </svg>
         </div>
         <span>{upvotes}</span>
         <div class="icon">
-          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="1.8">
+          <svg viewBox="0 0 20 20" fill="none" stroke="#11151A" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M10 16.5l6-6h-4v-7h-4v7h-4l6 6z"/>
           </svg>
         </div>
@@ -248,7 +271,7 @@ def build_card_html(post):
 
       <div class="pill">
         <div class="icon">
-          <svg fill="none" stroke="#11151A" stroke-width="1.8" viewBox="0 0 24 24">
+          <svg fill="none" stroke="#11151A" stroke-width="2" viewBox="0 0 24 24">
             <circle cx="12" cy="8" r="6"/>
             <path d="M15.477 12.89L17 22l-5-3-5 3 1.523-9.11"/>
           </svg>
@@ -261,7 +284,6 @@ def build_card_html(post):
             <path d="m12.8 17.524 6.89-6.887a.9.9 0 0 0 0-1.273L12.8 2.477a1.64 1.64 0 0 0-1.782-.349 1.64 1.64 0 0 0-1.014 1.518v2.593C4.054 6.728 1.192 12.075 1 17.376a1.35 1.35 0 0 0 .862 1.32 1.35 1.35 0 0 0 1.531-.364l.334-.381c1.705-1.944 3.323-3.791 6.277-4.103v2.509c0 .667.398 1.262 1.014 1.518a1.64 1.64 0 0 0 1.783-.349zm-.994-1.548V12h-.9c-3.969 0-6.162 2.1-8.001 4.161.514-4.011 2.823-8.16 8-8.16h.9V4.024L17.784 10z"/>
           </svg>
         </div>
-        <span>8</span>
       </div>
     </div>
   </div>
@@ -269,8 +291,8 @@ def build_card_html(post):
 </html>"""
 
 async def render_html_to_card_png(post, output_image_path="temp/title_card.png"):
-    """Renderitza l'HTML clonat a PNG utilitzant Chromium."""
-    print("🎨 Renderitzant la targeta des de plantilla HTML idèntica...")
+    """Renderitza la targeta quadrada amb Playwright en mode Retina."""
+    print("🎨 Renderitzant la targeta quadrada (1:1)...")
     html_content = build_card_html(post)
     html_file = os.path.abspath("temp/card.html")
     with open(html_file, "w", encoding="utf-8") as f:
@@ -278,7 +300,7 @@ async def render_html_to_card_png(post, output_image_path="temp/title_card.png")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        page = await browser.new_page(viewport={"width": 1200, "height": 900}, device_scale_factor=2)
+        page = await browser.new_page(viewport={"width": 1200, "height": 1100}, device_scale_factor=2)
         await page.goto(f"file://{html_file}")
         
         card_el = page.locator("#reddit-card")
@@ -297,11 +319,9 @@ def format_ass_time(seconds):
 
 def generate_popin_word_subtitles(words_list, output_path="temp/captions.ass"):
     """
-    Subtítols TikTok D'UNA SOLA PARAULA AL CENTRE amb animació POP-IN BOUNCE:
-    - Comença al 75% de mida
-    - 0-70ms: Explota al 125% (impacte Pop)
-    - 70-140ms: Rebot elàstic al 100%
-    - Tipografia Impact / DejaVu Sans Bold, 88pt, groc elèctric amb vora negra de 8px.
+    Subtítols TikTok:
+    - 1 sola paraula al centre amb efecte Pop-In
+    - Si una paraula és llarga, redueix la mida automàticament per no tocar les vores
     """
     ass_header = """[Script Info]
 ScriptType: v4.00+
@@ -311,7 +331,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,Impact,88,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,2,0,1,8,3,5,60,60,60,1
+Style: TikTok,Impact,86,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,8,3,5,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -327,15 +347,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start_sec = item["start"]
         end_sec = item["end"]
         
-        # Allarguem lleugerament si la següent paraula comença aviat per continuïtat
         if i + 1 < len(words_list) and (words_list[i+1]["start"] - end_sec) < 0.25:
             end_sec = words_list[i+1]["start"]
 
         start_t = format_ass_time(start_sec)
         end_t = format_ass_time(end_sec)
 
-        # L'animació física de rebot pop-in
-        anim_tags = r"{\fscx75\fscy75\t(0,70,\fscx125\fscy125)\t(70,140,\fscx100\fscy100)}"
+        # Si la paraula supera les 8 lletres, ajustem la mida de la font automàticament
+        fs_override = ""
+        if len(cleaned) >= 9:
+            adjusted_fs = max(58, int(86 * (8.5 / len(cleaned))))
+            fs_override = f"\\fs{adjusted_fs}"
+
+        anim_tags = rf"{{\fscx75\fscy75\t(0,70,\fscx125\fscy125)\t(70,140,\fscx100\fscy100){fs_override}}}"
         dialogues.append(f"Dialogue: 0,{start_t},{end_t},TikTok,,0,0,0,,{anim_tags}{cleaned}")
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -356,9 +380,8 @@ async def main():
     
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
-    print(f"🎙️ Veu: {VOICE} | Velocitat: {VOICE_RATE} | To: {VOICE_PITCH}")
     
-    # 1. Targeta inicial
+    # 1. Targeta inicial quadrada (1:1)
     print("🗣️ Generating speech for Title...")
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
@@ -366,8 +389,8 @@ async def main():
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Història amb subtítols Pop-In accelerats
-    print("🗣️ Generating fast speech for Story...")
+    # 2. Història amb subtítols Pop-In nets
+    print("🗣️ Generating speech for Story...")
     story_audio = os.path.abspath("temp/story.mp3")
     story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
     
@@ -380,7 +403,7 @@ async def main():
         })
 
     total_video_duration = title_dur + story_dur
-    print(f"\n⏱️ Durada total amb ritme ràpid: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
+    print(f"\n⏱️ Durada total: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
 
     # 3. Concatenar àudios
     list_path = os.path.abspath("temp/audio_list.txt")
@@ -391,7 +414,7 @@ async def main():
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
 
-    # 4. Fitxer de subtítols amb animació Pop-In
+    # 4. Subtítols
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
@@ -413,13 +436,13 @@ async def main():
             "-c:v", "libx264", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 6. Muntatge amb targeta escalada a 920px (sense retalls) i subtítols sincronitzats
-    print("🎞️ Rendering final video with fast voice and Pop-In captions...")
+    # 6. Muntatge centrat: la targeta quadrada (880px) queda al centre de la pantalla
+    print("🎞️ Rendering final video with 1:1 Square Card...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (
         f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];"
-        f"[1:v]scale=920:-2[card];"
+        f"[1:v]scale=880:-2[card];"
         f"[v0][card]overlay=(W-w)/2:(H-h)/2:enable='between(t,0,{title_dur:.2f})'[v1];"
         f"[v1]subtitles='{escaped_ass}'[v]"
     )

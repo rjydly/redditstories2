@@ -286,8 +286,14 @@ def format_ass_time(seconds):
         centis = 99
     return f"{hrs}:{mins:02d}:{secs:02d}.{centis:02d}"
 
-def generate_single_word_subtitles(words_list, output_path="temp/captions.ass"):
-    """Subtítols TikTok D'UNA SOLA PARAULA AL CENTRE (1 by 1)."""
+def generate_popin_word_subtitles(words_list, output_path="temp/captions.ass"):
+    """
+    Subtítols TikTok D'UNA SOLA PARAULA AL CENTRE amb animació POP-IN BOUNCE:
+    - Comença al 75% de mida
+    - 0-70ms: Explota al 125% (impacte Pop)
+    - 70-140ms: Rebot elàstic al 100%
+    - Tipografia Impact / DejaVu Sans Bold, 88pt, groc elèctric amb vora negra de 8px.
+    """
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -296,7 +302,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,DejaVu Sans,84,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,8,2,5,80,80,80,1
+Style: TikTok,Impact,88,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,2,0,1,8,3,5,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -312,13 +318,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start_sec = item["start"]
         end_sec = item["end"]
         
+        # Allarguem lleugerament si la següent paraula comença aviat per continuïtat
         if i + 1 < len(words_list) and (words_list[i+1]["start"] - end_sec) < 0.25:
             end_sec = words_list[i+1]["start"]
 
         start_t = format_ass_time(start_sec)
         end_t = format_ass_time(end_sec)
 
-        dialogues.append(f"Dialogue: 0,{start_t},{end_t},TikTok,,0,0,0,,{cleaned}")
+        # L'animació física de rebot pop-in
+        anim_tags = r"{\fscx75\fscy75\t(0,70,\fscx125\fscy125)\t(70,140,\fscx100\fscy100)}"
+        dialogues.append(f"Dialogue: 0,{start_t},{end_t},TikTok,,0,0,0,,{anim_tags}{cleaned}")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(dialogues) + "\n")
@@ -347,7 +356,7 @@ async def main():
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Història amb subtítols d'1 sola paraula
+    # 2. Història amb subtítols Pop-In
     print("🗣️ Generating speech for Story...")
     story_audio = os.path.abspath("temp/story.mp3")
     story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
@@ -372,9 +381,9 @@ async def main():
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
 
-    # 4. Subtítols
+    # 4. Fitxer de subtítols amb animació Pop-In
     ass_path = os.path.abspath("temp/captions.ass")
-    generate_single_word_subtitles(adjusted_words, ass_path)
+    generate_popin_word_subtitles(adjusted_words, ass_path)
 
     # 5. Fons de vídeo
     bg_file = find_local_background()
@@ -394,8 +403,8 @@ async def main():
             "-c:v", "libx264", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 6. Muntatge corregit amb escalat de la targeta a 920px per evitar retalls
-    print("🎞️ Rendering final video with fitted card...")
+    # 6. Muntatge corregit: escala la targeta a 920px per deixar 80px de marge a cada costat
+    print("🎞️ Rendering final video with fitted card and Pop-In captions...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (

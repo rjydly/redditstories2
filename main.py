@@ -40,96 +40,168 @@ def get_story_from_csv(csv_path="stories.csv"):
 
     return selected_story
 
-def fetch_oddlysatisfying_background():
+def get_clip_duration(file_path):
+    """Retorna la durada exacta d'un fitxer de vídeo amb ffprobe."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        return float(res.stdout.strip())
+    except:
+        return 0.0
+
+def download_single_reddit_clip(candidate_url, temp_dir, prefix):
+    """Descarrega un sol clip de Reddit usant RedDownloader amb suport per yt-dlp."""
+    target_file = os.path.join(temp_dir, f"{prefix}.mp4")
+    dest_folder = temp_dir + os.sep
+
+    # Intent amb RedDownloader
+    try:
+        from RedDownloader import RedDownloader
+        RedDownloader.Download(candidate_url, output=prefix, destination=dest_folder, quality=720)
+    except Exception as e:
+        pass
+
+    possible_paths = [
+        target_file,
+        f"{temp_dir}{prefix}.mp4",
+        os.path.abspath(f"temp{prefix}.mp4"),
+        os.path.abspath(f"{prefix}.mp4"),
+        os.path.join(temp_dir, f"temp{prefix}.mp4")
+    ]
+    for p in possible_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 10000:
+            if p != target_file:
+                if os.path.exists(target_file):
+                    os.remove(target_file)
+                os.replace(p, target_file)
+            return target_file
+
+    # Rescat amb yt-dlp
+    try:
+        subprocess.run([
+            "yt-dlp", "--no-playlist",
+            "-f", "bestvideo[ext=mp4]/best[ext=mp4]/best",
+            "-o", target_file,
+            candidate_url
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(target_file) and os.path.getsize(target_file) > 10000:
+            return target_file
+    except:
+        pass
+
+    return None
+
+def fetch_multi_satisfying_background(target_duration):
     """
-    Obté un vídeo de r/oddlysatisfying (hot) via RSS públic
-    i el descarrega amb RedDownloader (o yt-dlp).
+    Descarrega múltiples clips de r/oddlysatisfying i r/satisfying de màxim 15 segons cadascun
+    fins a cobrir o superar la durada total de l'àudio.
     """
-    print("🎬 Buscant vídeo a r/oddlysatisfying (hot) via RSS públic...")
+    print(f"\n🎬 Cercant clips curts (màxim 15s) fins a cobrir {target_duration:.1f} segons d'àudio...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
-    target_file = os.path.join(temp_dir, "reddit_bg.mp4")
+    temp_bg = os.path.join(temp_dir, "bg.mp4")
 
-    # Netejar possibles fitxers temporals previs
-    for f_old in [target_file, f"{temp_dir}reddit_bg.mp4", "tempreddit_bg.mp4", "reddit_bg.mp4"]:
-        if os.path.exists(f_old):
-            try:
-                os.remove(f_old)
-            except:
-                pass
+    # Múltiples canals RSS per tenir una llista àmplia de vídeos
+    rss_urls = [
+        "https://www.reddit.com/r/oddlysatisfying/hot.rss",
+        "https://www.reddit.com/r/satisfying/hot.rss",
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=week"
+    ]
 
-    rss_url = "https://www.reddit.com/r/oddlysatisfying/hot.rss"
-    feed = feedparser.parse(rss_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
+    candidate_links = []
+    seen_links = set()
 
-    candidate_url = None
-    candidate_title = ""
+    for r_url in rss_urls:
+        feed = feedparser.parse(r_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
+        for entry in feed.entries:
+            summary = entry.get("summary", "")
+            link = entry.get("link", "")
+            if link not in seen_links and ("v.redd.it" in summary or "video" in summary.lower()):
+                candidate_links.append((link, entry.get("title", "Satisfying Clip")))
+                seen_links.add(link)
 
-    # Cerquem el primer post d'oddlysatisfying que contingui un vídeo real (v.redd.it)
-    for entry in feed.entries:
-        summary = entry.get("summary", "")
-        link = entry.get("link", "")
-        if "v.redd.it" in summary or "video" in summary.lower():
-            candidate_url = link
-            candidate_title = entry.get("title", "Satisfying Video")
+    accumulated_time = 0.0
+    valid_clips = []
+    clip_counter = 0
+
+    for link, title in candidate_links:
+        if accumulated_time >= target_duration:
             break
 
-    if not candidate_url and feed.entries:
-        candidate_url = feed.entries[0].link
-        candidate_title = feed.entries[0].title
+        prefix = f"clip_{clip_counter}"
+        print(f"⬇️ Descarregant candidat: '{title[:45]}...'")
+        raw_clip = download_single_reddit_clip(link, temp_dir, prefix)
 
-    if candidate_url:
-        print(f"✨ Vídeo trobat: '{candidate_title}'")
-        print(f"⬇️ Descarregant amb RedDownloader: {candidate_url}")
+        if not raw_clip or not os.path.exists(raw_clip):
+            continue
 
-        # 1. Intent amb RedDownloader (afegim la barra '/' obligatòria a la carpeta)
-        try:
-            from RedDownloader import RedDownloader
-            dest_folder = temp_dir + os.sep  # Amb barra final perquè no fusioni 'tempreddit_bg'
-            RedDownloader.Download(
-                candidate_url,
-                output="reddit_bg",
-                destination=dest_folder,
-                quality=720
-            )
-        except Exception as e:
-            print(f"⚠️ Avís de RedDownloader ({e}).")
+        clip_dur = get_clip_duration(raw_clip)
 
-        # Comprovar totes les variants on RedDownloader pot haver guardat el fitxer
-        possible_paths = [
-            target_file,
-            f"{temp_dir}reddit_bg.mp4",
-            os.path.abspath("tempreddit_bg.mp4"),
-            os.path.abspath("reddit_bg.mp4"),
-            os.path.join(temp_dir, "tempreddit_bg.mp4")
-        ]
-        for p in possible_paths:
-            if os.path.exists(p):
-                print(f"✅ Vídeo de RedDownloader localitzat a: {p}")
-                if p != target_file:
-                    if os.path.exists(target_file):
-                        os.remove(target_file)
-                    os.replace(p, target_file)
-                return target_file
+        # CONDICIÓ SOL·LICITADA: No més de 15 segons. Si dura més, es descarta!
+        if clip_dur > 15.0 or clip_dur < 3.0:
+            print(f"⏩ Descartat (dura {clip_dur:.1f}s, només volem clips <= 15s).")
+            try:
+                os.remove(raw_clip)
+            except:
+                pass
+            continue
 
-        # 2. Rescat amb yt-dlp
-        print("🔄 RedDownloader no ha deixat fitxer. Baixant amb yt-dlp...")
+        # Normalitzem el clip directament a 1080x1920 (9:16) a 30fps
+        norm_file = os.path.join(temp_dir, f"norm_{clip_counter}.mp4")
         try:
             subprocess.run([
-                "yt-dlp", "--no-playlist",
-                "-f", "bestvideo[ext=mp4]/best[ext=mp4]/best",
-                "-o", target_file,
-                candidate_url
-            ], check=True)
-            if os.path.exists(target_file):
-                return target_file
+                "ffmpeg", "-y", "-i", raw_clip,
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+                "-c:v", "libx264", "-an", norm_file
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            valid_clips.append(norm_file)
+            accumulated_time += clip_dur
+            print(f"✅ Clip acceptat #{clip_counter + 1} ({clip_dur:.1f}s) | Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
+            clip_counter += 1
         except Exception as e:
-            print(f"⚠️ Error amb yt-dlp: {e}")
+            print(f"⚠️ Error normalitzant clip: {e}")
 
-    # Fallback només si falla absolutament tot
+        # Netejar el fitxer cru
+        try:
+            os.remove(raw_clip)
+        except:
+            pass
+
+    # Si hem aconseguit almenys un clip, els unim tots
+    if valid_clips:
+        concat_list_file = os.path.join(temp_dir, "clips_to_merge.txt")
+        with open(concat_list_file, "w", encoding="utf-8") as f:
+            for c in valid_clips:
+                f.write(f"file '{c}'\n")
+
+        print(f"🔗 Unint {len(valid_clips)} clips curts en un sol fons continu de {accumulated_time:.1f}s...")
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-stream_loop", "-1",  # Bucle suau en cas que faltessin 2 o 3 segons
+            "-i", concat_list_file,
+            "-t", str(int(target_duration) + 2),
+            "-c:v", "copy",
+            "-an",
+            temp_bg
+        ], check=True)
+        return temp_bg
+
+    # Fallback de seguretat si no s'ha pogut descarregar cap clip
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
-            print(f"📁 Fent servir vídeo de reserva: {f}")
-            return os.path.abspath(f)
+            print(f"📁 Fent servir vídeo local de reserva: {f}")
+            subprocess.run([
+                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
+                "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
+                "-c:v", "libx264", "-an", temp_bg
+            ], check=True)
+            return temp_bg
 
     return None
 
@@ -458,10 +530,7 @@ async def main():
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Descarregar vídeo curtet de r/oddlysatisfying
-    bg_video_path = fetch_oddlysatisfying_background()
-
-    # 3. Història amb subtítols Pop-In
+    # 2. Àudio de la història i durada total
     print("🗣️ Generating speech for Story...")
     story_audio = os.path.abspath("temp/story.mp3")
     story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
@@ -475,9 +544,9 @@ async def main():
         })
 
     total_video_duration = title_dur + story_dur
-    print(f"\n⏱️ Durada total: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
+    print(f"\n⏱️ Durada total necessària: {total_video_duration:.1f}s ({(total_video_duration/60):.2f} minuts)")
 
-    # 4. Concatenar àudios
+    # 3. Concatenar àudios
     list_path = os.path.abspath("temp/audio_list.txt")
     full_audio = os.path.abspath("temp/full_audio.mp3")
     with open(list_path, "w") as f:
@@ -486,28 +555,16 @@ async def main():
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
 
-    # 5. Fitxer de subtítols
+    # 4. Fitxer de subtítols
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 6. Fons de vídeo
+    # 5. Descarregar i muntar clips curts de r/oddlysatisfying (<= 15s) fins a cobrir la durada
+    bg_video_path = fetch_multi_satisfying_background(total_video_duration)
     temp_bg = os.path.abspath("temp/bg.mp4")
-    if bg_video_path and os.path.exists(bg_video_path):
-        print(f"🎬 Muntant fons de r/oddlysatisfying: {bg_video_path}")
-        subprocess.run([
-            "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
-            "-i", bg_video_path, "-t", str(int(total_video_duration) + 2),
-            "-c:v", "libx264", "-an", temp_bg
-        ], check=True)
-    else:
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "lavfi",
-            "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={int(total_video_duration) + 2}",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", temp_bg
-        ], check=True)
 
-    # 7. Muntatge final centrat
-    print("🎞️ Rendering final video with r/oddlysatisfying background...")
+    # 6. Muntatge final centrat
+    print("🎞️ Rendering final video with dynamic multi-clip background...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (

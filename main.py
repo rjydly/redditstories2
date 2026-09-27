@@ -42,7 +42,7 @@ def get_story_from_csv(csv_path="stories.csv"):
 
 def fetch_oddlysatisfying_background():
     """
-    Obté un vídeo de r/oddlysatisfying (hot) via RSS públic immune a bloquejos
+    Obté un vídeo de r/oddlysatisfying (hot) via RSS públic
     i el descarrega amb RedDownloader (o yt-dlp).
     """
     print("🎬 Buscant vídeo a r/oddlysatisfying (hot) via RSS públic...")
@@ -50,9 +50,13 @@ def fetch_oddlysatisfying_background():
     os.makedirs(temp_dir, exist_ok=True)
     target_file = os.path.join(temp_dir, "reddit_bg.mp4")
 
-    # Si ja s'havia descarregat un vídeo previ a temp, l'eliminem
-    if os.path.exists(target_file):
-        os.remove(target_file)
+    # Netejar possibles fitxers temporals previs
+    for f_old in [target_file, f"{temp_dir}reddit_bg.mp4", "tempreddit_bg.mp4", "reddit_bg.mp4"]:
+        if os.path.exists(f_old):
+            try:
+                os.remove(f_old)
+            except:
+                pass
 
     rss_url = "https://www.reddit.com/r/oddlysatisfying/hot.rss"
     feed = feedparser.parse(rss_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
@@ -69,7 +73,6 @@ def fetch_oddlysatisfying_background():
             candidate_title = entry.get("title", "Satisfying Video")
             break
 
-    # Si cap té v.redd.it explícit al resum, agafem el primer post per provar-lo
     if not candidate_url and feed.entries:
         candidate_url = feed.entries[0].link
         candidate_title = feed.entries[0].title
@@ -78,27 +81,38 @@ def fetch_oddlysatisfying_background():
         print(f"✨ Vídeo trobat: '{candidate_title}'")
         print(f"⬇️ Descarregant amb RedDownloader: {candidate_url}")
 
-        # 1. Intent amb RedDownloader
+        # 1. Intent amb RedDownloader (afegim la barra '/' obligatòria a la carpeta)
         try:
             from RedDownloader import RedDownloader
+            dest_folder = temp_dir + os.sep  # Amb barra final perquè no fusioni 'tempreddit_bg'
             RedDownloader.Download(
                 candidate_url,
                 output="reddit_bg",
-                destination=temp_dir,
+                destination=dest_folder,
                 quality=720
             )
         except Exception as e:
             print(f"⚠️ Avís de RedDownloader ({e}).")
 
-        # Comprovar si RedDownloader l'ha desat a temp o arrel
-        if os.path.exists(target_file):
-            return target_file
-        if os.path.exists("reddit_bg.mp4"):
-            os.rename("reddit_bg.mp4", target_file)
-            return target_file
+        # Comprovar totes les variants on RedDownloader pot haver guardat el fitxer
+        possible_paths = [
+            target_file,
+            f"{temp_dir}reddit_bg.mp4",
+            os.path.abspath("tempreddit_bg.mp4"),
+            os.path.abspath("reddit_bg.mp4"),
+            os.path.join(temp_dir, "tempreddit_bg.mp4")
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                print(f"✅ Vídeo de RedDownloader localitzat a: {p}")
+                if p != target_file:
+                    if os.path.exists(target_file):
+                        os.remove(target_file)
+                    os.replace(p, target_file)
+                return target_file
 
-        # 2. Rescat amb yt-dlp (mai falla amb vídeos de Reddit)
-        print("🔄 RedDownloader no ha completat la descàrrega. Baixant directament amb yt-dlp...")
+        # 2. Rescat amb yt-dlp
+        print("🔄 RedDownloader no ha deixat fitxer. Baixant amb yt-dlp...")
         try:
             subprocess.run([
                 "yt-dlp", "--no-playlist",
@@ -111,7 +125,7 @@ def fetch_oddlysatisfying_background():
         except Exception as e:
             print(f"⚠️ Error amb yt-dlp: {e}")
 
-    # Fallback si tot falla
+    # Fallback només si falla absolutament tot
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
             print(f"📁 Fent servir vídeo de reserva: {f}")

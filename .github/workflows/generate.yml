@@ -49,6 +49,14 @@ jobs:
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           echo "RELEASE_PAGE=$RELEASE_PAGE" >> $GITHUB_ENV
 
+      - name: Guardar historial de fons utilitzats i històries al repositori
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add stories.csv used_backgrounds.txt || true
+          git commit -m "Auto: actualitzar historial de fons i estat d'històries [skip ci]" || true
+          git push || true
+
       - name: Mostrar Enllaç al Log i al Resum
         run: |
           echo "======================================================================"

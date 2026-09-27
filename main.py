@@ -45,164 +45,6 @@ def get_story_from_csv(csv_path="stories.csv"):
 
     return selected_story
 
-async def fetch_short_oddlysatisfying_clips(target_duration, context):
-    """
-    Cerca al catàleg històric d'r/oddlysatisfying utilitzant l'API de Playwright.
-    Filtra clips curts (<= 15s) abans de baixar-los i els descarrega directament.
-    """
-    print(f"\n🎬 Cercant clips curts (<= 15s) a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
-    temp_dir = os.path.abspath("temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_bg = os.path.join(temp_dir, "bg.mp4")
-    used_file = "used_backgrounds.txt"
-
-    used_ids = set()
-    if os.path.exists(used_file):
-        with open(used_file, "r", encoding="utf-8") as f:
-            used_ids = set(line.strip() for line in f if line.strip())
-
-    candidate_clips = []
-    seen = set()
-
-    # Consultem les llistes Top All, Top Year i Hot amb el motor natiu de Playwright
-    api_endpoints = [
-        "https://www.reddit.com/r/oddlysatisfying/top.json?t=all&limit=100",
-        "https://www.reddit.com/r/oddlysatisfying/top.json?t=year&limit=100",
-        "https://www.reddit.com/r/oddlysatisfying/hot.json?limit=50"
-    ]
-
-    for endpoint in api_endpoints:
-        try:
-            res = await context.request.get(endpoint)
-            if res.ok:
-                data = await res.json()
-                for child in data.get("data", {}).get("children", []):
-                    p = child.get("data", {})
-                    post_id = p.get("id")
-                    title = p.get("title", "")
-
-                    if not post_id or post_id in used_ids or post_id in seen:
-                        continue
-                    if any(kw in title.lower() for kw in SPAM_KEYWORDS):
-                        continue
-
-                    # Comprovar si té vídeo de Reddit i durada
-                    media = p.get("media") or p.get("secure_media")
-                    if p.get("is_video") and media and "reddit_video" in media:
-                        dur = media["reddit_video"].get("duration", 0)
-                        fallback_url = media["reddit_video"].get("fallback_url")
-
-                        # FILTRE ESTRICTE: Només clips entre 4s i 15 segons
-                        if 4.0 <= dur <= 15.0 and fallback_url:
-                            candidate_clips.append({
-                                "id": post_id,
-                                "title": title,
-                                "duration": dur,
-                                "url": fallback_url
-                            })
-                            seen.add(post_id)
-        except Exception as e:
-            print(f"⚠️ Avís consultant endpoint: {e}")
-
-    # Fallback per RSS si calgués
-    if not candidate_clips:
-        print("🔄 Recorrent a RSS de seguretat...")
-        feed = feedparser.parse("https://www.reddit.com/r/oddlysatisfying/hot.rss")
-        for entry in feed.entries:
-            link = entry.get("link", "")
-            id_m = re.search(r'/comments/([a-z0-9]+)/', link)
-            if id_m and id_m.group(1) not in used_ids:
-                candidate_clips.append({
-                    "id": id_m.group(1),
-                    "title": entry.get("title", "Satisfying Clip"),
-                    "duration": 10.0,
-                    "url": link
-                })
-
-    print(f"📦 Clips curts (<= 15s) d'oddlysatisfying trobats: {len(candidate_clips)}")
-    random.shuffle(candidate_clips)
-
-    accumulated_time = 0.0
-    valid_clips = []
-    clip_counter = 0
-
-    for c in candidate_clips:
-        if accumulated_time >= target_duration:
-            break
-
-        raw_file = os.path.join(temp_dir, f"raw_{clip_counter}.mp4")
-        norm_file = os.path.join(temp_dir, f"norm_{clip_counter}.mp4")
-
-        print(f"⬇️ Baixant clip #{clip_counter + 1} ({c['duration']}s): '{c['title'][:38]}...'")
-        try:
-            # Si és fallback_url descarrega en 1 segon amb curl
-            if "v.redd.it" in c["url"]:
-                subprocess.run(["curl", "-sL", c["url"], "-o", raw_file], check=True, timeout=15)
-            else:
-                from RedDownloader import RedDownloader
-                RedDownloader.Download(c["url"], output=f"raw_{clip_counter}", destination=temp_dir + os.sep, quality=720)
-
-            if not os.path.exists(raw_file):
-                continue
-
-            # Normalitzar directament a 1080x1920 (9:16) a 30fps
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", raw_file,
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-an",
-                norm_file
-            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            actual_dur = get_clip_duration(norm_file)
-            valid_clips.append(norm_file)
-            accumulated_time += actual_dur
-            clip_counter += 1
-
-            with open(used_file, "a", encoding="utf-8") as f:
-                f.write(c["id"] + "\n")
-
-            print(f"✅ Afegit! Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
-        except Exception as e:
-            print(f"⚠️ Error processant clip: {e}")
-
-        try: os.remove(raw_file)
-        except: pass
-
-    # Unir tots els clips
-    if valid_clips:
-        concat_list = os.path.join(temp_dir, "clips_to_merge.txt")
-        with open(concat_list, "w", encoding="utf-8") as f:
-            for c in valid_clips:
-                f.write(f"file '{c}'\n")
-
-        print(f"🔗 Unint {len(valid_clips)} clips curts d'oddlysatisfying en un fons continu...")
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-stream_loop", "-1",
-            "-i", concat_list,
-            "-t", str(int(target_duration) + 2),
-            "-c", "copy",
-            temp_bg
-        ], check=True)
-        return temp_bg
-
-    # Fallback de reserva només si falla internet
-    for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
-        if os.path.exists(f):
-            print(f"📁 Fent servir vídeo de reserva: {f}")
-            subprocess.run([
-                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
-                "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
-                "-c:v", "libx264", "-preset", "ultrafast", "-an", temp_bg
-            ], check=True)
-            return temp_bg
-
-    return None
-
 def get_clip_duration(file_path):
     """Retorna la durada d'un fitxer de vídeo."""
     try:
@@ -215,6 +57,123 @@ def get_clip_duration(file_path):
         return float(res.stdout.strip())
     except:
         return 0.0
+
+def get_clean_background_video(target_duration):
+    """
+    1. Primer cerca a la carpeta de vídeos verificats (assets/backgrounds/).
+       Això elimina al 100% qualsevol risc de publicitat o marques d'aigua.
+    2. Si no n'hi ha, cerca a r/oddlysatisfying amb filtres estrictes.
+    """
+    temp_dir = os.path.abspath("temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_bg = os.path.join(temp_dir, "bg.mp4")
+    used_file = "used_backgrounds.txt"
+
+    used_items = set()
+    if os.path.exists(used_file):
+        with open(used_file, "r", encoding="utf-8") as f:
+            used_items = set(line.strip() for line in f if line.strip())
+
+    # --- OPCIÓ 1: BANC DE VÍDEOS VERIFICATS DEL REPOSITORI (RECOMANAT) ---
+    bg_folder = "assets/backgrounds"
+    if os.path.exists(bg_folder):
+        local_vids = [
+            os.path.join(bg_folder, f) for f in os.listdir(bg_folder)
+            if f.lower().endswith((".mp4", ".mov", ".mkv")) and f not in used_items
+        ]
+        if local_vids:
+            chosen = random.choice(local_vids)
+            chosen_name = os.path.basename(chosen)
+            print(f"💎 Fent servir vídeo net i verificat del banc: {chosen_name}")
+            
+            with open(used_file, "a", encoding="utf-8") as f:
+                f.write(chosen_name + "\n")
+
+            subprocess.run([
+                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
+                "-i", os.path.abspath(chosen),
+                "-t", str(int(target_duration) + 2),
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+                "-c:v", "libx264", "-preset", "ultrafast", "-an",
+                temp_bg
+            ], check=True)
+            return temp_bg
+
+    # --- OPCIÓ 2: CERCA A REDDIT AMB MÀXIMA SEGURETAT ---
+    print(f"🎬 Cercant a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
+    rss_urls = [
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=all&limit=50",
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=year&limit=50",
+        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50"
+    ]
+    candidate_links = []
+    seen = set()
+
+    for r_url in rss_urls:
+        try:
+            feed = feedparser.parse(r_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
+            for entry in feed.entries:
+                summary = entry.get("summary", "")
+                link = entry.get("link", "")
+                title = entry.get("title", "")
+                id_m = re.search(r'/comments/([a-z0-9]+)/', link)
+                post_id = id_m.group(1) if id_m else link
+
+                if post_id in used_items or any(kw in title.lower() for kw in SPAM_KEYWORDS):
+                    continue
+                if link not in seen and ("v.redd.it" in summary or "video" in summary.lower()):
+                    candidate_links.append((link, title, post_id))
+                    seen.add(link)
+        except:
+            pass
+
+    for link, title, post_id in candidate_links:
+        prefix = "bg_candidate"
+        dest_folder = temp_dir + os.sep
+        target_file = os.path.join(temp_dir, f"{prefix}.mp4")
+
+        try:
+            from RedDownloader import RedDownloader
+            RedDownloader.Download(link, output=prefix, destination=dest_folder, quality=720)
+        except:
+            pass
+
+        possible_paths = [target_file, f"{temp_dir}{prefix}.mp4", os.path.abspath(f"temp{prefix}.mp4"), os.path.abspath(f"{prefix}.mp4")]
+        downloaded = None
+        for p in possible_paths:
+            if os.path.exists(p) and os.path.getsize(p) > 10000:
+                downloaded = p
+                break
+
+        if downloaded:
+            dur = get_clip_duration(downloaded)
+            if dur >= 10.0:
+                print(f"✨ Vídeo seleccionat ({dur:.1f}s): '{title[:40]}...'")
+                with open(used_file, "a", encoding="utf-8") as f:
+                    f.write(post_id + "\n")
+
+                subprocess.run([
+                    "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
+                    "-i", downloaded,
+                    "-t", str(int(target_duration) + 2),
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-an",
+                    temp_bg
+                ], check=True)
+                return temp_bg
+
+    # Fons local únic de reserva
+    for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
+        if os.path.exists(f):
+            print(f"📁 Fent servir vídeo de reserva: {f}")
+            subprocess.run([
+                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
+                "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
+                "-c:v", "libx264", "-preset", "ultrafast", "-an", temp_bg
+            ], check=True)
+            return temp_bg
+
+    return None
 
 async def generate_speech_with_word_timestamps(text, audio_path):
     """Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula."""
@@ -236,7 +195,6 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                 dur_sec = chunk["duration"] / 10_000_000
                 raw_token = chunk["text"].strip()
                 
-                # Desglossar expressions compostes (ex: 22-year-old -> 22, year, old)
                 if "-" in raw_token and len(raw_token) > 5:
                     parts = [p for p in raw_token.split("-") if p]
                     if parts:
@@ -277,7 +235,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
     return total_dur, words
 
 def build_card_html(post):
-    """Construeix la targeta quadrada (1:1) translúcida amb likes i comentaris elevats."""
+    """Construeix la targeta quadrada (1:1) translúcida."""
     story_text = post.get("story", "")
     preview_words = story_text.split()[:22]
     story_preview = " ".join(preview_words) + "..."
@@ -459,7 +417,7 @@ def build_card_html(post):
 </body>
 </html>"""
 
-async def render_html_to_card_png(post, output_image_path, context):
+async def render_html_to_card_png(post, output_image_path):
     """Renderitza la targeta quadrada (1:1) translúcida amb Playwright."""
     print("🎨 Renderitzant la targeta quadrada translúcida (1:1)...")
     html_content = build_card_html(post)
@@ -467,11 +425,13 @@ async def render_html_to_card_png(post, output_image_path, context):
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    page = await context.new_page()
-    await page.goto(f"file://{html_file}")
-    card_el = page.locator("#reddit-card")
-    await card_el.screenshot(path=output_image_path, omit_background=True)
-    await page.close()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1200, "height": 1100}, device_scale_factor=2)
+        await page.goto(f"file://{html_file}")
+        card_el = page.locator("#reddit-card")
+        await card_el.screenshot(path=output_image_path, omit_background=True)
+        await browser.close()
 
 def format_ass_time(seconds):
     """Format de temps per a subtítols ASS: H:MM:SS.cs"""
@@ -537,7 +497,11 @@ async def main():
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
 
-    # 2. Veu de la història
+    # 2. Targeta inicial
+    title_card = os.path.abspath("temp/title_card.png")
+    await render_html_to_card_png(story_data, title_card)
+
+    # 3. Veu de la història
     print("🗣️ Generant àudio de la Història...")
     story_audio = os.path.abspath("temp/story.mp3")
     story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
@@ -553,7 +517,7 @@ async def main():
     total_video_duration = title_dur + story_dur
     print(f"\n⏱️ Durada total del vídeo: {total_video_duration:.1f}s")
 
-    # 3. Concatenar àudios
+    # 4. Concatenar àudios
     list_path = os.path.abspath("temp/audio_list.txt")
     full_audio = os.path.abspath("temp/full_audio.mp3")
     with open(list_path, "w") as f:
@@ -562,61 +526,19 @@ async def main():
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
 
-    # 4. Fitxer de subtítols
+    # 5. Fitxer de subtítols
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 5. Playwright: targeta translúcida i descàrrega de clips curts d'oddlysatisfying
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        context = await browser.new_context(
-            viewport={"width": 1200, "height": 1100},
-            device_scale_factor=2,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
+    # 6. Fons de vídeo (Banc de fons verificats o Reddit)
+    temp_bg = get_clean_background_video(total_video_duration)
 
-        title_card = os.path.abspath("temp/title_card.png")
-        await render_html_to_card_png(story_data, title_card, context)
-
-        # Baixar clips curts (<= 15s) de r/oddlysatisfying
-        bg_video_path = await fetch_short_oddlysatisfying_clips(total_video_duration, context)
-
-        await browser.close()
-
-    temp_bg = os.path.abspath("temp/bg.mp4")
-
-    # 6. Muntatge del vídeo de fons (evitant l'error d'escriure sobre el mateix fitxer)
-    if bg_video_path and os.path.exists(bg_video_path):
-        if os.path.abspath(bg_video_path) != temp_bg:
-            print(f"🎬 Muntant fons de reserva: {bg_video_path}")
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-stream_loop", "-1",
-                "-ss", "0",
-                "-i", bg_video_path,
-                "-t", str(int(total_video_duration) + 2),
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-an",
-                temp_bg
-            ], check=True)
-    else:
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "lavfi",
-            "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={int(total_video_duration) + 2}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", temp_bg
-        ], check=True)
-
-    # 7. MUNTATGE FINAL: Animació Pop-In (salt elàstic) + Fade Out a la targeta
-    print("🎞️ Renderitzant vídeo final amb Pop-In i Fade-Out de la targeta...")
+    # 7. MUNTATGE FINAL: Targeta animada amb Pop In i Fade Out (sense desaparèixer)
+    print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
-    
     fade_out_start = max(0.0, title_dur - 0.35)
 
-    # Filtre d'animació de la targeta:
-    # 1. format=yuva420p per a canal alfa
-    # 2. scale dinàmic amb eval=frame: neix al 75%, explota al 105% i rebota al 100% (880px) en 0.25s
-    # 3. fade in (0.15s) i fade out (0.35s)
+    # -loop 1 -t {title_dur} garanteix que la imatge estigui present durant tot el títol
     filter_complex = (
         f"[0:v]null[v0];"
         f"[1:v]format=yuva420p,"
@@ -630,6 +552,9 @@ async def main():
     cmd = [
         "ffmpeg", "-y",
         "-i", temp_bg,
+        "-framerate", "30",
+        "-loop", "1",
+        "-t", str(title_dur),
         "-i", title_card,
         "-i", full_audio,
         "-filter_complex", filter_complex,
@@ -647,7 +572,7 @@ async def main():
     subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n🎉 SUCCESS! Vídeo generat amb targeta animada i clips curts ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+    print(f"\n🎉 SUCCESS! final_video.mp4 generat amb èxit ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
 
 if __name__ == "__main__":
     asyncio.run(main())

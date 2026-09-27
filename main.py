@@ -58,11 +58,26 @@ def get_clip_duration(file_path):
     except:
         return 0.0
 
+def find_all_asset_videos():
+    """Troba tots els vídeos dins de la carpeta assets/ amb qualsevol títol o extensió."""
+    search_dirs = ["assets", "assets/backgrounds"]
+    found = []
+    for d in search_dirs:
+        if os.path.exists(d):
+            for root, _, files in os.walk(d):
+                for f in files:
+                    if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
+                        full_path = os.path.join(root, f)
+                        # Ignorem temporals o targetes
+                        if not any(x in f.lower() for x in ["temp", "final_video", "title_card"]):
+                            found.append(full_path)
+    return list(set(found))
+
 def get_clean_background_video(target_duration):
     """
-    1. Primer cerca a la carpeta de vídeos verificats (assets/backgrounds/).
-       Això elimina al 100% qualsevol risc de publicitat o marques d'aigua.
-    2. Si no n'hi ha, cerca a r/oddlysatisfying amb filtres estrictes.
+    1. Revisa prioritàriament els teus vídeos pujats a assets/ (amb títols random).
+    2. Rota entre ells usant used_backgrounds.txt per no repetir-los.
+    3. Si s'han fet servir tots, reinicia el cicle automàticament.
     """
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
@@ -74,96 +89,41 @@ def get_clean_background_video(target_duration):
         with open(used_file, "r", encoding="utf-8") as f:
             used_items = set(line.strip() for line in f if line.strip())
 
-    # --- OPCIÓ 1: BANC DE VÍDEOS VERIFICATS DEL REPOSITORI (RECOMANAT) ---
-    bg_folder = "assets/backgrounds"
-    if os.path.exists(bg_folder):
-        local_vids = [
-            os.path.join(bg_folder, f) for f in os.listdir(bg_folder)
-            if f.lower().endswith((".mp4", ".mov", ".mkv")) and f not in used_items
-        ]
-        if local_vids:
-            chosen = random.choice(local_vids)
-            chosen_name = os.path.basename(chosen)
-            print(f"💎 Fent servir vídeo net i verificat del banc: {chosen_name}")
-            
-            with open(used_file, "a", encoding="utf-8") as f:
-                f.write(chosen_name + "\n")
+    # --- 1. BUSCAR VÍDEOS A ASSETS/ (PRIORITAT MÀXIMA) ---
+    local_vids = find_all_asset_videos()
+    if local_vids:
+        print(f"📁 S'han detectat {len(local_vids)} vídeos a la carpeta assets/")
+        
+        # Filtrem els que encara no s'hagin fet servir
+        unused_vids = [v for v in local_vids if os.path.basename(v) not in used_items]
+        
+        # Si ja s'han utilitzat tots els vídeos disponibles d'assets, reiniciem el cicle!
+        if not unused_vids:
+            print("🔄 S'han utilitzat tots els vídeos d'assets! Reiniciant el cicle de rotació...")
+            unused_vids = local_vids
+            # Netejar l'historial de fitxers locals al fitxer
+            with open(used_file, "w", encoding="utf-8") as f:
+                f.write("")
 
-            subprocess.run([
-                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
-                "-i", os.path.abspath(chosen),
-                "-t", str(int(target_duration) + 2),
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-                "-c:v", "libx264", "-preset", "ultrafast", "-an",
-                temp_bg
-            ], check=True)
-            return temp_bg
+        chosen = random.choice(unused_vids)
+        chosen_name = os.path.basename(chosen)
+        print(f"💎 Fent servir vídeo seleccionat d'assets: '{chosen_name}'")
 
-    # --- OPCIÓ 2: CERCA A REDDIT AMB MÀXIMA SEGURETAT ---
-    print(f"🎬 Cercant a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
-    rss_urls = [
-        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=all&limit=50",
-        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=year&limit=50",
-        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50"
-    ]
-    candidate_links = []
-    seen = set()
+        with open(used_file, "a", encoding="utf-8") as f:
+            f.write(chosen_name + "\n")
 
-    for r_url in rss_urls:
-        try:
-            feed = feedparser.parse(r_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
-            for entry in feed.entries:
-                summary = entry.get("summary", "")
-                link = entry.get("link", "")
-                title = entry.get("title", "")
-                id_m = re.search(r'/comments/([a-z0-9]+)/', link)
-                post_id = id_m.group(1) if id_m else link
+        subprocess.run([
+            "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
+            "-i", os.path.abspath(chosen),
+            "-t", str(int(target_duration) + 2),
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-an",
+            temp_bg
+        ], check=True)
+        return temp_bg
 
-                if post_id in used_items or any(kw in title.lower() for kw in SPAM_KEYWORDS):
-                    continue
-                if link not in seen and ("v.redd.it" in summary or "video" in summary.lower()):
-                    candidate_links.append((link, title, post_id))
-                    seen.add(link)
-        except:
-            pass
-
-    for link, title, post_id in candidate_links:
-        prefix = "bg_candidate"
-        dest_folder = temp_dir + os.sep
-        target_file = os.path.join(temp_dir, f"{prefix}.mp4")
-
-        try:
-            from RedDownloader import RedDownloader
-            RedDownloader.Download(link, output=prefix, destination=dest_folder, quality=720)
-        except:
-            pass
-
-        possible_paths = [target_file, f"{temp_dir}{prefix}.mp4", os.path.abspath(f"temp{prefix}.mp4"), os.path.abspath(f"{prefix}.mp4")]
-        downloaded = None
-        for p in possible_paths:
-            if os.path.exists(p) and os.path.getsize(p) > 10000:
-                downloaded = p
-                break
-
-        if downloaded:
-            dur = get_clip_duration(downloaded)
-            if dur >= 10.0:
-                print(f"✨ Vídeo seleccionat ({dur:.1f}s): '{title[:40]}...'")
-                with open(used_file, "a", encoding="utf-8") as f:
-                    f.write(post_id + "\n")
-
-                subprocess.run([
-                    "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
-                    "-i", downloaded,
-                    "-t", str(int(target_duration) + 2),
-                    "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-an",
-                    temp_bg
-                ], check=True)
-                return temp_bg
-
-    # Fons local únic de reserva
-    for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
+    # --- 2. FALLBACK SI ASSETS ESTIGUÉS BUIT: REDDIT O RESERVA ---
+    for f in ["background.mp4", "Background.mp4"]:
         if os.path.exists(f):
             print(f"📁 Fent servir vídeo de reserva: {f}")
             subprocess.run([
@@ -195,6 +155,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                 dur_sec = chunk["duration"] / 10_000_000
                 raw_token = chunk["text"].strip()
                 
+                # Desglossar expressions compostes (ex: 22-year-old -> 22, year, old)
                 if "-" in raw_token and len(raw_token) > 5:
                     parts = [p for p in raw_token.split("-") if p]
                     if parts:
@@ -530,15 +491,14 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 6. Fons de vídeo (Banc de fons verificats o Reddit)
+    # 6. Fons de vídeo (Agafa automàticament vídeos d'assets/ amb qualsevol títol)
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 7. MUNTATGE FINAL: Targeta animada amb Pop In i Fade Out (sense desaparèixer)
+    # 7. MUNTATGE FINAL: Targeta animada amb Pop In i Fade Out (amb -framerate 30 -loop 1)
     print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.35)
 
-    # -loop 1 -t {title_dur} garanteix que la imatge estigui present durant tot el títol
     filter_complex = (
         f"[0:v]null[v0];"
         f"[1:v]format=yuva420p,"

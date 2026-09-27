@@ -59,7 +59,7 @@ def get_clip_duration(file_path):
         return 0.0
 
 def download_with_reddownloader(candidate_url, temp_dir, prefix):
-    """Descarrega el vídeo usant RedDownloader i captura el fitxer."""
+    """Descarrega el vídeo usant RedDownloader."""
     dest_folder = temp_dir + os.sep
     target_file = os.path.join(temp_dir, f"{prefix}.mp4")
 
@@ -88,25 +88,31 @@ def download_with_reddownloader(candidate_url, temp_dir, prefix):
 
 def fetch_oddlysatisfying_background(target_duration):
     """
-    Cerca un vídeo satisfactori a r/oddlysatisfying (preferint vídeos llargs i complets)
-    i el deixa reproduir sencer sense talls brusc.
+    Cerca un vídeo a r/oddlysatisfying evitant vídeos utilitzats anteriorment.
+    Guarda la ID del vídeo seleccionat a used_backgrounds.txt.
     """
-    print(f"\n🎬 Cercant un bon vídeo a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
+    print(f"\n🎬 Cercant un vídeo nou a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
     target_file = os.path.join(temp_dir, "reddit_bg.mp4")
+    used_file = "used_backgrounds.txt"
 
-    # Netejar possibles fitxers previs
+    # Carregar l'historial de vídeos ja fets servir
+    used_ids = set()
+    if os.path.exists(used_file):
+        with open(used_file, "r", encoding="utf-8") as f:
+            used_ids = set(line.strip() for line in f if line.strip())
+
     for f_old in [target_file, f"{temp_dir}reddit_bg.mp4", "tempreddit_bg.mp4", "reddit_bg.mp4"]:
         if os.path.exists(f_old):
             try: os.remove(f_old)
             except: pass
 
-    # Consultem els vídeos més votats de r/oddlysatisfying
     rss_urls = [
         "https://www.reddit.com/r/oddlysatisfying/top.rss?t=week&limit=50",
         "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50",
-        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=month&limit=50"
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=month&limit=50",
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=year&limit=50"
     ]
 
     candidate_links = []
@@ -121,16 +127,24 @@ def fetch_oddlysatisfying_background(target_duration):
                 title = entry.get("title", "")
                 if any(kw in title.lower() for kw in SPAM_KEYWORDS):
                     continue
+
+                # Extreure la ID de Reddit (ex: 1wr9jdj)
+                id_match = re.search(r'/comments/([a-z0-9]+)/', link)
+                post_id = id_match.group(1) if id_match else link
+
+                # FILTRE: Si ja s'ha fet servir aquest vídeo, el saltem!
+                if post_id in used_ids:
+                    continue
+
                 if link not in seen and ("v.redd.it" in summary or "video" in summary.lower()):
-                    candidate_links.append((link, title))
+                    candidate_links.append((link, title, post_id))
                     seen.add(link)
         except:
             pass
 
-    print(f"📦 Total de vídeos d'oddlysatisfying trobats: {len(candidate_links)}")
+    print(f"📦 Total de vídeos nous disponibles: {len(candidate_links)}")
 
-    # Cerquem el primer bon vídeo satisfactori (prioritzant vídeos llargs i fluids)
-    for link, title in candidate_links:
+    for link, title, post_id in candidate_links:
         prefix = "reddit_bg"
         print(f"⬇️ Descarregant: '{title[:45]}...'")
         downloaded = download_with_reddownloader(link, temp_dir, prefix)
@@ -138,12 +152,15 @@ def fetch_oddlysatisfying_background(target_duration):
         if downloaded and os.path.exists(downloaded):
             dur = get_clip_duration(downloaded)
             
-            # Si el vídeo té una durada decent (més de 15 segons), EL DEIXEM SENCER!
-            if dur >= 15.0:
-                print(f"✨ Vídeo llarg ideal trobat! Durada: {dur:.1f}s ('{title[:40]}...')")
-                return downloaded
-            elif dur >= 8.0:
-                print(f"✅ Vídeo vàlid trobat: {dur:.1f}s ('{title[:40]}...')")
+            # Preferim vídeos de més de 15s, o acceptem de més de 8s
+            if dur >= 15.0 or dur >= 8.0:
+                print(f"✨ Vídeo seleccionat! Durada: {dur:.1f}s ('{title[:40]}...')")
+                
+                # Guardem la ID del vídeo al fitxer per no repetir-lo mai més
+                with open(used_file, "a", encoding="utf-8") as f:
+                    f.write(post_id + "\n")
+                print(f"📝 ID [{post_id}] afegida a {used_file}")
+                
                 return downloaded
             else:
                 print(f"⏩ Massa curt ({dur:.1f}s), buscant-ne un altre...")
@@ -178,7 +195,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                 dur_sec = chunk["duration"] / 10_000_000
                 raw_token = chunk["text"].strip()
                 
-                # Desglossar expressions compostes (ex: 22-year-old -> 22, year, old)
+                # Desglossar expressions compostes
                 if "-" in raw_token and len(raw_token) > 5:
                     parts = [p for p in raw_token.split("-") if p]
                     if parts:
@@ -219,13 +236,18 @@ async def generate_speech_with_word_timestamps(text, audio_path):
     return total_dur, words
 
 def build_card_html(post):
-    """Construeix la targeta quadrada (1:1) amb text gran i preview breu."""
+    """
+    Construeix la targeta quadrada (1:1):
+    - Fons blanc translúcid (rgba) per veure el vídeo de fons
+    - Likes aleatoris (30k - 160k) i comentaris aleatoris (7k - 20k)
+    """
     story_text = post.get("story", "")
     preview_words = story_text.split()[:22]
     story_preview = " ".join(preview_words) + "..."
 
-    upvotes = post.get("upvotes", "42.8k")
-    comments = post.get("comments", "3.2k")
+    # Nombres aleatoris sol·licitats
+    upvotes = f"{random.uniform(30.0, 160.0):.1f}k"
+    comments = f"{random.uniform(7.0, 20.0):.1f}k"
     subreddit = post.get("subreddit", "confessions")
 
     return f"""<!DOCTYPE html>
@@ -243,11 +265,13 @@ def build_card_html(post):
       display: inline-block;
       padding: 30px;
     }}
+    /* Targeta translúcida: ressalta el text però deixa veure el vídeo al darrere */
     #reddit-card {{
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.86);
       border-radius: 28px;
       padding: 34px 38px;
-      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
+      border: 1.5px solid rgba(255, 255, 255, 0.55);
       width: 760px;
       display: flex;
       flex-direction: column;
@@ -300,8 +324,8 @@ def build_card_html(post):
     .body-text {{
       font-size: 21px;
       line-height: 1.48;
-      color: #4B5563;
-      font-weight: 400;
+      color: #374151;
+      font-weight: 500;
     }}
     .pills-container {{
       display: flex;
@@ -310,7 +334,7 @@ def build_card_html(post):
       margin-top: 6px;
     }}
     .pill {{
-      background-color: #E5EBEE;
+      background-color: rgba(229, 235, 238, 0.92);
       border-radius: 9999px;
       display: flex;
       align-items: center;
@@ -401,8 +425,8 @@ def build_card_html(post):
 </html>"""
 
 async def render_html_to_card_png(post, output_image_path):
-    """Renderitza la targeta quadrada (1:1) amb Playwright."""
-    print("🎨 Renderitzant la targeta quadrada (1:1)...")
+    """Renderitza la targeta translúcida amb Playwright."""
+    print("🎨 Renderitzant la targeta quadrada translúcida (1:1)...")
     html_content = build_card_html(post)
     html_file = os.path.abspath("temp/card.html")
     with open(html_file, "w", encoding="utf-8") as f:
@@ -475,7 +499,7 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Targeta inicial quadrada (1:1)
+    # 1. Targeta inicial quadrada translúcida (1:1)
     print("🗣️ Generant àudio del Títol...")
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
@@ -512,7 +536,7 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 5. Descarregar un vídeo satisfactori sencer (deixar-lo córrer de principi a fi)
+    # 5. Descarregar vídeo nou d'oddlysatisfying (sense repetir)
     bg_video_path = fetch_oddlysatisfying_background(total_video_duration)
     temp_bg = os.path.abspath("temp/bg.mp4")
 
@@ -538,7 +562,7 @@ async def main():
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 7. Muntatge final centrat
+    # 7. Muntatge final centrat (amb blending translúcid de la targeta)
     print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
@@ -569,7 +593,7 @@ async def main():
     subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n🎉 SUCCESS! Vídeo generat amb fons d'oddlysatisfying complet ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+    print(f"\n🎉 SUCCESS! Vídeo generat amb targeta translúcida i fons nou ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
 
 if __name__ == "__main__":
     asyncio.run(main())

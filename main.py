@@ -59,7 +59,7 @@ def get_clip_duration(file_path):
         return 0.0
 
 def download_with_reddownloader(candidate_url, temp_dir, prefix):
-    """Descarrega usant RedDownloader i captura el fitxer sigui quina sigui la ruta exacta."""
+    """Descarrega el vídeo usant RedDownloader i captura el fitxer."""
     dest_folder = temp_dir + os.sep
     target_file = os.path.join(temp_dir, f"{prefix}.mp4")
 
@@ -69,7 +69,6 @@ def download_with_reddownloader(candidate_url, temp_dir, prefix):
     except Exception as e:
         print(f"⚠️ Avís de RedDownloader: {e}")
 
-    # Comprovem totes les variants de rutes on RedDownloader pot haver deixat el vídeo
     possible_paths = [
         target_file,
         os.path.join(temp_dir, f"temp{prefix}.mp4"),
@@ -87,19 +86,26 @@ def download_with_reddownloader(candidate_url, temp_dir, prefix):
 
     return None
 
-def fetch_multi_satisfying_background(target_duration):
+def fetch_oddlysatisfying_background(target_duration):
     """
-    Descarrega exactament 4-5 clips de r/oddlysatisfying amb RedDownloader
-    i en retalla fragments de 10-12s (<= 15s) en segons.
+    Cerca un vídeo satisfactori a r/oddlysatisfying (preferint vídeos llargs i complets)
+    i el deixa reproduir sencer sense talls brusc.
     """
-    print(f"\n🎬 Cercant vídeos de r/oddlysatisfying per cobrir {target_duration:.1f}s...")
+    print(f"\n🎬 Cercant un bon vídeo a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
-    temp_bg = os.path.join(temp_dir, "bg.mp4")
+    target_file = os.path.join(temp_dir, "reddit_bg.mp4")
 
+    # Netejar possibles fitxers previs
+    for f_old in [target_file, f"{temp_dir}reddit_bg.mp4", "tempreddit_bg.mp4", "reddit_bg.mp4"]:
+        if os.path.exists(f_old):
+            try: os.remove(f_old)
+            except: pass
+
+    # Consultem els vídeos més votats de r/oddlysatisfying
     rss_urls = [
-        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50",
         "https://www.reddit.com/r/oddlysatisfying/top.rss?t=week&limit=50",
+        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50",
         "https://www.reddit.com/r/oddlysatisfying/top.rss?t=month&limit=50"
     ]
 
@@ -118,92 +124,37 @@ def fetch_multi_satisfying_background(target_duration):
                 if link not in seen and ("v.redd.it" in summary or "video" in summary.lower()):
                     candidate_links.append((link, title))
                     seen.add(link)
-        except Exception as e:
-            print(f"⚠️ Error llegint feed: {e}")
+        except:
+            pass
 
-    print(f"📦 Total de vídeos d'oddlysatisfying llestos: {len(candidate_links)}")
-    random.shuffle(candidate_links)
+    print(f"📦 Total de vídeos d'oddlysatisfying trobats: {len(candidate_links)}")
 
-    accumulated_time = 0.0
-    valid_clips = []
-    clip_counter = 0
-
-    # Només en descarreguem els necessaris (4 o 5) per no perdre temps
+    # Cerquem el primer bon vídeo satisfactori (prioritzant vídeos llargs i fluids)
     for link, title in candidate_links:
-        if accumulated_time >= target_duration:
-            break
+        prefix = "reddit_bg"
+        print(f"⬇️ Descarregant: '{title[:45]}...'")
+        downloaded = download_with_reddownloader(link, temp_dir, prefix)
 
-        prefix = f"clip_{clip_counter}"
-        norm_file = os.path.join(temp_dir, f"norm_{clip_counter}.mp4")
+        if downloaded and os.path.exists(downloaded):
+            dur = get_clip_duration(downloaded)
+            
+            # Si el vídeo té una durada decent (més de 15 segons), EL DEIXEM SENCER!
+            if dur >= 15.0:
+                print(f"✨ Vídeo llarg ideal trobat! Durada: {dur:.1f}s ('{title[:40]}...')")
+                return downloaded
+            elif dur >= 8.0:
+                print(f"✅ Vídeo vàlid trobat: {dur:.1f}s ('{title[:40]}...')")
+                return downloaded
+            else:
+                print(f"⏩ Massa curt ({dur:.1f}s), buscant-ne un altre...")
+                try: os.remove(downloaded)
+                except: pass
 
-        print(f"⬇️ Descarregant amb RedDownloader: '{title[:40]}...'")
-        raw_clip = download_with_reddownloader(link, temp_dir, prefix)
-
-        if not raw_clip or not os.path.exists(raw_clip):
-            print("⏩ No s'ha pogut descarregar aquest post, provant el següent...")
-            continue
-
-        dur = get_clip_duration(raw_clip)
-        if dur < 3.0:
-            try: os.remove(raw_clip)
-            except: pass
-            continue
-
-        # Regla estricta: mai més de 14 segons per clip a la pantalla
-        slice_dur = min(14.0, dur)
-
-        # Conversió accelerada a 1080x1920 (9:16) en 1 segon
-        try:
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", raw_clip,
-                "-t", str(slice_dur),
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-an",
-                norm_file
-            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            actual_dur = get_clip_duration(norm_file)
-            valid_clips.append(norm_file)
-            accumulated_time += actual_dur
-            clip_counter += 1
-            print(f"✅ Clip #{clip_counter} llest ({actual_dur:.1f}s) | Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
-        except Exception as e:
-            print(f"⚠️ Error processant clip: {e}")
-
-        try: os.remove(raw_clip)
-        except: pass
-
-    # Unim els 4-5 clips únics en un fons continu
-    if valid_clips:
-        concat_list = os.path.join(temp_dir, "clips_to_merge.txt")
-        with open(concat_list, "w", encoding="utf-8") as f:
-            for c in valid_clips:
-                f.write(f"file '{c}'\n")
-
-        print(f"🔗 Unint {len(valid_clips)} clips únics d'oddlysatisfying ({accumulated_time:.1f}s)...")
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-stream_loop", "-1",
-            "-i", concat_list,
-            "-t", str(int(target_duration) + 2),
-            "-c", "copy",
-            temp_bg
-        ], check=True)
-        return temp_bg
-
-    # Fons de reserva només si no hi ha internet
+    # Fons de seguretat
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
-            subprocess.run([
-                "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
-                "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
-                "-c:v", "libx264", "-preset", "ultrafast", "-an", temp_bg
-            ], check=True)
-            return temp_bg
+            print(f"📁 Fent servir vídeo de reserva: {f}")
+            return os.path.abspath(f)
 
     return None
 
@@ -524,7 +475,7 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Targeta inicial
+    # 1. Targeta inicial quadrada (1:1)
     print("🗣️ Generant àudio del Títol...")
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
@@ -561,16 +512,38 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 5. Descarregar ràpidament 4-5 clips d'oddlysatisfying amb RedDownloader
-    bg_video_path = fetch_multi_satisfying_background(total_video_duration)
+    # 5. Descarregar un vídeo satisfactori sencer (deixar-lo córrer de principi a fi)
+    bg_video_path = fetch_oddlysatisfying_background(total_video_duration)
     temp_bg = os.path.abspath("temp/bg.mp4")
 
-    # 6. Muntatge final accelerat (veryfast + multi-fils)
-    print("🎞️ Renderitzant vídeo final a màxima velocitat...")
+    # 6. Muntatge del vídeo de fons
+    if bg_video_path and os.path.exists(bg_video_path):
+        print(f"🎬 Muntant fons de r/oddlysatisfying: {bg_video_path}")
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",
+            "-ss", "0",
+            "-i", bg_video_path,
+            "-t", str(int(total_video_duration) + 2),
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-an",
+            temp_bg
+        ], check=True)
+    else:
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", f"color=c=#0f172a:s=1080x1920:r=30:d={int(total_video_duration) + 2}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", temp_bg
+        ], check=True)
+
+    # 7. Muntatge final centrat
+    print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (
-        f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];"
+        f"[0:v]null[v0];"
         f"[1:v]scale=880:-2[card];"
         f"[v0][card]overlay=(W-w)/2:(H-h)/2:enable='between(t,0,{title_dur:.2f})'[v1];"
         f"[v1]subtitles='{escaped_ass}'[v]"
@@ -596,7 +569,7 @@ async def main():
     subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n🎉 SUCCESS! Vídeo llest en temps rècord ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+    print(f"\n🎉 SUCCESS! Vídeo generat amb fons d'oddlysatisfying complet ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
 
 if __name__ == "__main__":
     asyncio.run(main())

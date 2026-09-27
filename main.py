@@ -6,6 +6,7 @@ import random
 import asyncio
 import subprocess
 import edge_tts
+import feedparser
 from playwright.async_api import async_playwright
 
 VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
@@ -46,10 +47,10 @@ def get_story_from_csv(csv_path="stories.csv"):
 
 async def fetch_short_oddlysatisfying_clips(target_duration, context):
     """
-    Cerca al catàleg de r/oddlysatisfying i filtra la durada ABANS de descarregar.
-    Només descarrega clips de <= 15s i que no s'hagin fet servir mai.
+    Cerca al catàleg històric d'r/oddlysatisfying utilitzant l'API de Playwright.
+    Filtra clips curts (<= 15s) abans de baixar-los i els descarrega directament.
     """
-    print(f"\n🎬 Cercant clips curts (<= 15s) de r/oddlysatisfying per cobrir {target_duration:.1f}s...")
+    print(f"\n🎬 Cercant clips curts (<= 15s) a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
     temp_bg = os.path.join(temp_dir, "bg.mp4")
@@ -60,64 +61,71 @@ async def fetch_short_oddlysatisfying_clips(target_duration, context):
         with open(used_file, "r", encoding="utf-8") as f:
             used_ids = set(line.strip() for line in f if line.strip())
 
-    page = await context.new_page()
-    await page.goto("https://www.reddit.com/r/oddlysatisfying/")
-
-    # Obtenim el catàleg històric directament com a JSON en segon pla
-    catalog = await page.evaluate("""async () => {
-        const urls = [
-            'https://www.reddit.com/r/oddlysatisfying/top.json?t=all&limit=100',
-            'https://www.reddit.com/r/oddlysatisfying/top.json?t=year&limit=100',
-            'https://www.reddit.com/r/oddlysatisfying/hot.json?limit=50'
-        ];
-        let items = [];
-        for (const u of urls) {
-            try {
-                const r = await fetch(u);
-                const j = await r.json();
-                items = items.concat(j.data.children.map(c => c.data));
-            } catch(e) {}
-        }
-        return items;
-    }""")
-    await page.close()
-
     candidate_clips = []
     seen = set()
 
-    for p in catalog:
-        post_id = p.get("id")
-        title = p.get("title", "")
+    # Consultem les llistes Top All, Top Year i Hot amb el motor natiu de Playwright
+    api_endpoints = [
+        "https://www.reddit.com/r/oddlysatisfying/top.json?t=all&limit=100",
+        "https://www.reddit.com/r/oddlysatisfying/top.json?t=year&limit=100",
+        "https://www.reddit.com/r/oddlysatisfying/hot.json?limit=50"
+    ]
 
-        # Filtres: no spam, no repetit
-        if not post_id or post_id in used_ids or post_id in seen:
-            continue
-        if any(kw in title.lower() for kw in SPAM_KEYWORDS):
-            continue
+    for endpoint in api_endpoints:
+        try:
+            res = await context.request.get(endpoint)
+            if res.ok:
+                data = await res.json()
+                for child in data.get("data", {}).get("children", []):
+                    p = child.get("data", {})
+                    post_id = p.get("id")
+                    title = p.get("title", "")
 
-        # FILTRE DE VÍDEO I DURADA ESTRICTA (<= 15s) ABANS DE BAIXAR RES
-        if p.get("is_video") and p.get("media") and p["media"].get("reddit_video"):
-            dur = p["media"]["reddit_video"].get("duration", 0)
-            fallback_url = p["media"]["reddit_video"].get("fallback_url")
+                    if not post_id or post_id in used_ids or post_id in seen:
+                        continue
+                    if any(kw in title.lower() for kw in SPAM_KEYWORDS):
+                        continue
 
-            # CONDICIÓ: Únicament clips entre 4s i 15s!
-            if 4 <= dur <= 15.0 and fallback_url:
+                    # Comprovar si té vídeo de Reddit i durada
+                    media = p.get("media") or p.get("secure_media")
+                    if p.get("is_video") and media and "reddit_video" in media:
+                        dur = media["reddit_video"].get("duration", 0)
+                        fallback_url = media["reddit_video"].get("fallback_url")
+
+                        # FILTRE ESTRICTE: Només clips entre 4s i 15 segons
+                        if 4.0 <= dur <= 15.0 and fallback_url:
+                            candidate_clips.append({
+                                "id": post_id,
+                                "title": title,
+                                "duration": dur,
+                                "url": fallback_url
+                            })
+                            seen.add(post_id)
+        except Exception as e:
+            print(f"⚠️ Avís consultant endpoint: {e}")
+
+    # Fallback per RSS si calgués
+    if not candidate_clips:
+        print("🔄 Recorrent a RSS de seguretat...")
+        feed = feedparser.parse("https://www.reddit.com/r/oddlysatisfying/hot.rss")
+        for entry in feed.entries:
+            link = entry.get("link", "")
+            id_m = re.search(r'/comments/([a-z0-9]+)/', link)
+            if id_m and id_m.group(1) not in used_ids:
                 candidate_clips.append({
-                    "id": post_id,
-                    "title": title,
-                    "duration": dur,
-                    "url": fallback_url
+                    "id": id_m.group(1),
+                    "title": entry.get("title", "Satisfying Clip"),
+                    "duration": 10.0,
+                    "url": link
                 })
-                seen.add(post_id)
 
-    print(f"📦 Clips de <= 15s trobats a r/oddlysatisfying: {len(candidate_clips)}")
+    print(f"📦 Clips curts (<= 15s) d'oddlysatisfying trobats: {len(candidate_clips)}")
     random.shuffle(candidate_clips)
 
     accumulated_time = 0.0
     valid_clips = []
     clip_counter = 0
 
-    # Baixem només els clips necessaris amb curl directe (1s per clip)
     for c in candidate_clips:
         if accumulated_time >= target_duration:
             break
@@ -127,9 +135,17 @@ async def fetch_short_oddlysatisfying_clips(target_duration, context):
 
         print(f"⬇️ Baixant clip #{clip_counter + 1} ({c['duration']}s): '{c['title'][:38]}...'")
         try:
-            subprocess.run(["curl", "-sL", c["url"], "-o", raw_file], check=True, timeout=15)
-            
-            # Normalitzar a 1080x1920 (9:16) a 30fps en menys d'1 segon
+            # Si és fallback_url descarrega en 1 segon amb curl
+            if "v.redd.it" in c["url"]:
+                subprocess.run(["curl", "-sL", c["url"], "-o", raw_file], check=True, timeout=15)
+            else:
+                from RedDownloader import RedDownloader
+                RedDownloader.Download(c["url"], output=f"raw_{clip_counter}", destination=temp_dir + os.sep, quality=720)
+
+            if not os.path.exists(raw_file):
+                continue
+
+            # Normalitzar directament a 1080x1920 (9:16) a 30fps
             subprocess.run([
                 "ffmpeg", "-y",
                 "-i", raw_file,
@@ -140,29 +156,29 @@ async def fetch_short_oddlysatisfying_clips(target_duration, context):
                 norm_file
             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+            actual_dur = get_clip_duration(norm_file)
             valid_clips.append(norm_file)
-            accumulated_time += c["duration"]
+            accumulated_time += actual_dur
             clip_counter += 1
 
-            # Guardar la ID com a utilitzada
             with open(used_file, "a", encoding="utf-8") as f:
                 f.write(c["id"] + "\n")
 
             print(f"✅ Afegit! Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
         except Exception as e:
-            print(f"⚠️ Error processant: {e}")
+            print(f"⚠️ Error processant clip: {e}")
 
         try: os.remove(raw_file)
         except: pass
 
-    # Unió instantània de tots els clips curts
+    # Unir tots els clips
     if valid_clips:
         concat_list = os.path.join(temp_dir, "clips_to_merge.txt")
         with open(concat_list, "w", encoding="utf-8") as f:
             for c in valid_clips:
                 f.write(f"file '{c}'\n")
 
-        print(f"🔗 Unint {len(valid_clips)} clips únics de r/oddlysatisfying en un fons continu...")
+        print(f"🔗 Unint {len(valid_clips)} clips curts d'oddlysatisfying en un fons continu...")
         subprocess.run([
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -174,7 +190,7 @@ async def fetch_short_oddlysatisfying_clips(target_duration, context):
         ], check=True)
         return temp_bg
 
-    # Fons de reserva només si no hi ha connexió
+    # Fallback de reserva només si falla internet
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
             print(f"📁 Fent servir vídeo de reserva: {f}")
@@ -186,6 +202,19 @@ async def fetch_short_oddlysatisfying_clips(target_duration, context):
             return temp_bg
 
     return None
+
+def get_clip_duration(file_path):
+    """Retorna la durada d'un fitxer de vídeo."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        return float(res.stdout.strip())
+    except:
+        return 0.0
 
 async def generate_speech_with_word_timestamps(text, audio_path):
     """Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula."""
@@ -253,7 +282,6 @@ def build_card_html(post):
     preview_words = story_text.split()[:22]
     story_preview = " ".join(preview_words) + "..."
 
-    # Likes aleatoris entre 30k i 160k, comentaris entre 7k i 20k
     upvotes = f"{random.uniform(30.0, 160.0):.1f}k"
     comments = f"{random.uniform(7.0, 20.0):.1f}k"
     subreddit = post.get("subreddit", "confessions")
@@ -538,7 +566,7 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 5. Playwright: targeta translúcida i descàrrega de clips curts (<= 15s) de r/oddlysatisfying
+    # 5. Playwright: targeta translúcida i descàrrega de clips curts d'oddlysatisfying
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         context = await browser.new_context(
@@ -550,27 +578,28 @@ async def main():
         title_card = os.path.abspath("temp/title_card.png")
         await render_html_to_card_png(story_data, title_card, context)
 
-        # Baixar exclusivament clips curts (<= 15s) de r/oddlysatisfying
+        # Baixar clips curts (<= 15s) de r/oddlysatisfying
         bg_video_path = await fetch_short_oddlysatisfying_clips(total_video_duration, context)
 
         await browser.close()
 
     temp_bg = os.path.abspath("temp/bg.mp4")
 
-    # 6. Muntatge del vídeo de fons
+    # 6. Muntatge del vídeo de fons (evitant l'error d'escriure sobre el mateix fitxer)
     if bg_video_path and os.path.exists(bg_video_path):
-        print(f"🎬 Muntant fons de r/oddlysatisfying: {bg_video_path}")
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-ss", "0",
-            "-i", bg_video_path,
-            "-t", str(int(total_video_duration) + 2),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-an",
-            temp_bg
-        ], check=True)
+        if os.path.abspath(bg_video_path) != temp_bg:
+            print(f"🎬 Muntant fons de reserva: {bg_video_path}")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-stream_loop", "-1",
+                "-ss", "0",
+                "-i", bg_video_path,
+                "-t", str(int(total_video_duration) + 2),
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-an",
+                temp_bg
+            ], check=True)
     else:
         subprocess.run([
             "ffmpeg", "-y", "-f", "lavfi",
@@ -578,13 +607,22 @@ async def main():
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", temp_bg
         ], check=True)
 
-    # 7. Muntatge final centrat
-    print("🎞️ Renderitzant vídeo final...")
+    # 7. MUNTATGE FINAL: Animació Pop-In (salt elàstic) + Fade Out a la targeta
+    print("🎞️ Renderitzant vídeo final amb Pop-In i Fade-Out de la targeta...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
+    fade_out_start = max(0.0, title_dur - 0.35)
+
+    # Filtre d'animació de la targeta:
+    # 1. format=yuva420p per a canal alfa
+    # 2. scale dinàmic amb eval=frame: neix al 75%, explota al 105% i rebota al 100% (880px) en 0.25s
+    # 3. fade in (0.15s) i fade out (0.35s)
     filter_complex = (
-        f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];"
-        f"[1:v]scale=880:-2[card];"
+        f"[0:v]null[v0];"
+        f"[1:v]format=yuva420p,"
+        f"scale=w='trunc((880 * if(lt(t,0.15), 0.75 + 0.30*(t/0.15), if(lt(t,0.25), 1.05 - 0.05*((t-0.15)/0.10), 1.0)))/2)*2':h=-2:eval=frame,"
+        f"fade=t=in:st=0:d=0.15:alpha=1,"
+        f"fade=t=out:st={fade_out_start:.2f}:d=0.35:alpha=1[card];"
         f"[v0][card]overlay=(W-w)/2:(H-h)/2:enable='between(t,0,{title_dur:.2f})'[v1];"
         f"[v1]subtitles='{escaped_ass}'[v]"
     )
@@ -609,7 +647,7 @@ async def main():
     subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n🎉 SUCCESS! Vídeo generat amb clips curts de r/oddlysatisfying ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+    print(f"\n🎉 SUCCESS! Vídeo generat amb targeta animada i clips curts ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
 
 if __name__ == "__main__":
     asyncio.run(main())

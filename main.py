@@ -13,6 +13,12 @@ VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
 VOICE_RATE = os.getenv("TTS_RATE", "+35%")
 VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
 
+# Paraules prohibides per evitar spam o crèdits
+SPAM_KEYWORDS = [
+    "tiktok", "@", "watermark", "credit", "promo", "shop", "buy", "store",
+    "follow", "link in", "discount", "amazon", "product", "gadget", "brand"
+]
+
 def get_story_from_csv(csv_path="stories.csv"):
     """Llegeix la primera història pendent del CSV."""
     if not os.path.exists(csv_path):
@@ -41,7 +47,7 @@ def get_story_from_csv(csv_path="stories.csv"):
     return selected_story
 
 def get_clip_duration(file_path):
-    """Retorna la durada exacta d'un fitxer de vídeo amb ffprobe."""
+    """Retorna la durada d'un fitxer de vídeo."""
     try:
         res = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
@@ -54,10 +60,11 @@ def get_clip_duration(file_path):
         return 0.0
 
 def download_single_reddit_clip(candidate_url, temp_dir, prefix):
-    """Descarrega un sol clip de Reddit usant RedDownloader amb suport per yt-dlp."""
+    """Descarrega un sol clip de Reddit de forma robusta."""
     target_file = os.path.join(temp_dir, f"{prefix}.mp4")
     dest_folder = temp_dir + os.sep
 
+    # Intent amb RedDownloader
     try:
         from RedDownloader import RedDownloader
         RedDownloader.Download(candidate_url, output=prefix, destination=dest_folder, quality=720)
@@ -79,6 +86,7 @@ def download_single_reddit_clip(candidate_url, temp_dir, prefix):
                 os.replace(p, target_file)
             return target_file
 
+    # Rescat amb yt-dlp
     try:
         subprocess.run([
             "yt-dlp", "--no-playlist",
@@ -95,23 +103,20 @@ def download_single_reddit_clip(candidate_url, temp_dir, prefix):
 
 def fetch_multi_satisfying_background(target_duration):
     """
-    Cerca entre centenars de posts de r/Satisfyingasfuck, r/oddlysatisfying i r/satisfying
-    i descarrega suficients clips únics (<= 15s) per cobrir el 100% de la durada sense repetir.
+    Cerca exclusivament als millors posts de r/oddlysatisfying (Top de l'any, Top històric i Top mes).
+    Descarrega clips naturals de màxim 15 segons començant des del segon 0.
     """
-    print(f"\n🎬 Cercant clips curts (<= 15s) per cobrir {target_duration:.1f} segons d'àudio...")
+    print(f"\n🎬 Cercant clips purs a r/oddlysatisfying per cobrir {target_duration:.1f}s...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
     temp_bg = os.path.join(temp_dir, "bg.mp4")
 
-    # Ampliem les fonts a 7 feeds amb més de 140 vídeos potencials
+    # Accedim als grans arxius històrics de r/oddlysatisfying (milers de vídeos de màxima qualitat)
     rss_urls = [
-        "https://www.reddit.com/r/Satisfyingasfuck/hot.rss?limit=50",
-        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=50",
-        "https://www.reddit.com/r/satisfying/hot.rss?limit=50",
-        "https://www.reddit.com/r/Satisfyingasfuck/top.rss?t=week&limit=50",
-        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=week&limit=50",
-        "https://www.reddit.com/r/mildlysatisfying/hot.rss?limit=50",
-        "https://www.reddit.com/r/Satisfyingasfuck/top.rss?t=month&limit=50"
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=year&limit=100",
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=all&limit=100",
+        "https://www.reddit.com/r/oddlysatisfying/top.rss?t=month&limit=100",
+        "https://www.reddit.com/r/oddlysatisfying/hot.rss?limit=100"
     ]
 
     candidate_links = []
@@ -123,15 +128,20 @@ def fetch_multi_satisfying_background(target_duration):
             for entry in feed.entries:
                 summary = entry.get("summary", "")
                 link = entry.get("link", "")
+                title = entry.get("title", "")
+                title_lower = title.lower()
+
+                # Filtre net: cap post amb paraules d'spam, xarxes o crèdits
+                if any(kw in title_lower for kw in SPAM_KEYWORDS):
+                    continue
+
                 if link not in seen_links and ("v.redd.it" in summary or "video" in summary.lower()):
-                    candidate_links.append((link, entry.get("title", "Satisfying Clip")))
+                    candidate_links.append((link, title))
                     seen_links.add(link)
         except:
             pass
 
-    print(f"📦 Total de vídeos potencials localitzats: {len(candidate_links)}")
-    
-    # Barregem els vídeos per tenir varietat a cada execució
+    print(f"📦 Total de vídeos d'oddlysatisfying disponibles al catàleg: {len(candidate_links)}")
     random.shuffle(candidate_links)
 
     accumulated_time = 0.0
@@ -150,8 +160,8 @@ def fetch_multi_satisfying_background(target_duration):
 
         clip_dur = get_clip_duration(raw_clip)
 
-        # REGLA ESTRICTA: Màxim 15 segons. Si dura més, es descarta completament!
-        if clip_dur > 15.0 or clip_dur < 3.0:
+        # CONDICIÓ ESTRICTA: Màxim 15 segons. Si dura més, es descarta!
+        if clip_dur > 15.0 or clip_dur < 4.0:
             print(f"⏩ Descartat (dura {clip_dur:.1f}s, només volem clips <= 15s).")
             try:
                 os.remove(raw_clip)
@@ -159,37 +169,41 @@ def fetch_multi_satisfying_background(target_duration):
                 pass
             continue
 
-        # Normalitzem el clip a 1080x1920 (9:16) a 30fps
+        # El vídeo comença des del segon 0 natural
         norm_file = os.path.join(temp_dir, f"norm_{clip_counter}.mp4")
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-i", raw_clip,
+                "ffmpeg", "-y",
+                "-i", raw_clip,
                 "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
                 "-c:v", "libx264", "-an", norm_file
             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+            actual_dur = get_clip_duration(norm_file)
             valid_clips.append(norm_file)
-            accumulated_time += clip_dur
-            print(f"✅ Clip acceptat #{clip_counter + 1} ({clip_dur:.1f}s) | Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
+            accumulated_time += actual_dur
+            print(f"✅ Clip acceptat #{clip_counter + 1} ({actual_dur:.1f}s) '{title[:35]}...' | Acumulat: {accumulated_time:.1f}s / {target_duration:.1f}s")
             clip_counter += 1
         except Exception as e:
-            print(f"⚠️ Error normalitzant clip: {e}")
+            print(f"⚠️ Error processant clip: {e}")
 
         try:
             os.remove(raw_clip)
         except:
             pass
 
+    # Unim tots els clips únics en el fons continu
     if valid_clips:
         concat_list_file = os.path.join(temp_dir, "clips_to_merge.txt")
         with open(concat_list_file, "w", encoding="utf-8") as f:
             for c in valid_clips:
                 f.write(f"file '{c}'\n")
 
-        print(f"🔗 Unint {len(valid_clips)} clips únics en un fons continu de {accumulated_time:.1f}s...")
+        print(f"🔗 Unint {len(valid_clips)} clips únics d'oddlysatisfying en un fons continu de {accumulated_time:.1f}s...")
         subprocess.run([
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
+            "-stream_loop", "-1",  # Només per cobrir si faltés mig segon
             "-i", concat_list_file,
             "-t", str(int(target_duration) + 2),
             "-c:v", "copy",
@@ -198,10 +212,10 @@ def fetch_multi_satisfying_background(target_duration):
         ], check=True)
         return temp_bg
 
-    # Fallback només si falla internet
+    # Fallback de seguretat
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
-            print(f"📁 Fent servir vídeo local de reserva: {f}")
+            print(f"📁 Fent servir vídeo de reserva: {f}")
             subprocess.run([
                 "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
                 "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
@@ -565,12 +579,12 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 5. Descarregar clips únics curts (<= 15s) de múltiples subreddits fins a cobrir la durada
+    # 5. Descarregar i muntar clips purs exclusivament de r/oddlysatisfying (<= 15s)
     bg_video_path = fetch_multi_satisfying_background(total_video_duration)
     temp_bg = os.path.abspath("temp/bg.mp4")
 
     # 6. Muntatge final centrat
-    print("🎞️ Rendering final video with dynamic multi-clip background...")
+    print("🎞️ Rendering final video with clean r/oddlysatisfying background...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     
     filter_complex = (

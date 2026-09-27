@@ -6,6 +6,7 @@ import random
 import asyncio
 import subprocess
 import edge_tts
+import feedparser
 from playwright.async_api import async_playwright
 
 VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
@@ -39,50 +40,49 @@ def get_story_from_csv(csv_path="stories.csv"):
 
     return selected_story
 
-async def fetch_oddlysatisfying_background(context):
+def fetch_oddlysatisfying_background():
     """
-    Obté un vídeo curtet de r/oddlysatisfying (hot) utilitzant Chromium per evitar bloquejos,
-    i el descarrega amb RedDownloader (o yt-dlp de rescat).
+    Obté un vídeo de r/oddlysatisfying (hot) via RSS públic immune a bloquejos
+    i el descarrega amb RedDownloader (o yt-dlp).
     """
-    print("🎬 Buscant vídeo curtet a r/oddlysatisfying (hot) amb Chromium...")
+    print("🎬 Buscant vídeo a r/oddlysatisfying (hot) via RSS públic...")
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
     target_file = os.path.join(temp_dir, "reddit_bg.mp4")
 
-    candidate = None
-    try:
-        page = await context.new_page()
-        # Carreguem el JSON directament amb el navegador per saltar el bloqueig 403
-        response = await page.goto("https://www.reddit.com/r/oddlysatisfying/hot.json?limit=40", timeout=25000)
-        data = await response.json()
-        await page.close()
+    # Si ja s'havia descarregat un vídeo previ a temp, l'eliminem
+    if os.path.exists(target_file):
+        os.remove(target_file)
 
-        posts = data["data"]["children"]
-        for child in posts:
-            p = child["data"]
-            # Comprovem si és un vídeo de Reddit
-            if p.get("is_video") and p.get("media") and p["media"].get("reddit_video"):
-                dur = p["media"]["reddit_video"].get("duration", 0)
-                # Filtre per a vídeos curtets (entre 10 i 60 segons)
-                if 10 <= dur <= 60:
-                    candidate = {
-                        "url": f"https://www.reddit.com{p['permalink']}",
-                        "title": p.get("title", "Satisfying Video"),
-                        "duration": dur
-                    }
-                    break
-    except Exception as e:
-        print(f"⚠️ Error obtenint el feed de r/oddlysatisfying: {e}")
+    rss_url = "https://www.reddit.com/r/oddlysatisfying/hot.rss"
+    feed = feedparser.parse(rss_url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS Reader")
 
-    if candidate:
-        print(f"✨ Vídeo curtet trobat: '{candidate['title']}' ({candidate['duration']}s)")
-        print(f"⬇️ Descarregant amb RedDownloader des de: {candidate['url']}")
+    candidate_url = None
+    candidate_title = ""
 
-        # 1. Intent principal amb RedDownloader
+    # Cerquem el primer post d'oddlysatisfying que contingui un vídeo real (v.redd.it)
+    for entry in feed.entries:
+        summary = entry.get("summary", "")
+        link = entry.get("link", "")
+        if "v.redd.it" in summary or "video" in summary.lower():
+            candidate_url = link
+            candidate_title = entry.get("title", "Satisfying Video")
+            break
+
+    # Si cap té v.redd.it explícit al resum, agafem el primer post per provar-lo
+    if not candidate_url and feed.entries:
+        candidate_url = feed.entries[0].link
+        candidate_title = feed.entries[0].title
+
+    if candidate_url:
+        print(f"✨ Vídeo trobat: '{candidate_title}'")
+        print(f"⬇️ Descarregant amb RedDownloader: {candidate_url}")
+
+        # 1. Intent amb RedDownloader
         try:
             from RedDownloader import RedDownloader
             RedDownloader.Download(
-                candidate["url"],
+                candidate_url,
                 output="reddit_bg",
                 destination=temp_dir,
                 quality=720
@@ -90,28 +90,28 @@ async def fetch_oddlysatisfying_background(context):
         except Exception as e:
             print(f"⚠️ Avís de RedDownloader ({e}).")
 
-        # Comprovar si RedDownloader l'ha desat
+        # Comprovar si RedDownloader l'ha desat a temp o arrel
         if os.path.exists(target_file):
             return target_file
         if os.path.exists("reddit_bg.mp4"):
             os.rename("reddit_bg.mp4", target_file)
             return target_file
 
-        # 2. Pla de rescat amb yt-dlp si RedDownloader no l'ha pogut baixar
+        # 2. Rescat amb yt-dlp (mai falla amb vídeos de Reddit)
         print("🔄 RedDownloader no ha completat la descàrrega. Baixant directament amb yt-dlp...")
         try:
             subprocess.run([
-                "yt-dlp",
-                "-f", "bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
+                "yt-dlp", "--no-playlist",
+                "-f", "bestvideo[ext=mp4]/best[ext=mp4]/best",
                 "-o", target_file,
-                candidate["url"]
+                candidate_url
             ], check=True)
             if os.path.exists(target_file):
                 return target_file
         except Exception as e:
-            print(f"⚠️ yt-dlp també ha donat error: {e}")
+            print(f"⚠️ Error amb yt-dlp: {e}")
 
-    # Fallback només si Reddit no té connexió
+    # Fallback si tot falla
     for f in ["background.mp4", "Background.mp4", "assets/background.mp4"]:
         if os.path.exists(f):
             print(f"📁 Fent servir vídeo de reserva: {f}")
@@ -361,19 +361,21 @@ def build_card_html(post):
 </body>
 </html>"""
 
-async def render_html_to_card_png(post, output_image_path, context):
-    """Renderitza la targeta quadrada amb Playwright reutilitzant la sessió."""
+async def render_html_to_card_png(post, output_image_path):
+    """Renderitza la targeta quadrada (1:1) amb Playwright."""
     print("🎨 Renderitzant la targeta quadrada (1:1)...")
     html_content = build_card_html(post)
     html_file = os.path.abspath("temp/card.html")
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    page = await context.new_page()
-    await page.goto(f"file://{html_file}")
-    card_el = page.locator("#reddit-card")
-    await card_el.screenshot(path=output_image_path, omit_background=True)
-    await page.close()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": 1200, "height": 1100}, device_scale_factor=2)
+        await page.goto(f"file://{html_file}")
+        card_el = page.locator("#reddit-card")
+        await card_el.screenshot(path=output_image_path, omit_background=True)
+        await browser.close()
 
 def format_ass_time(seconds):
     """Format de temps per a subtítols ASS: H:MM:SS.cs"""
@@ -433,28 +435,17 @@ async def main():
     
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
+
+    # 1. Targeta inicial quadrada (1:1)
+    print("🗣️ Generating speech for Title...")
+    title_audio = os.path.abspath("temp/title.mp3")
+    title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
     
-    # Iniciem el navegador per a la targeta i per a Reddit
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        context = await browser.new_context(
-            viewport={"width": 1200, "height": 1100},
-            device_scale_factor=2,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
+    title_card = os.path.abspath("temp/title_card.png")
+    await render_html_to_card_png(story_data, title_card)
 
-        # 1. Targeta inicial quadrada (1:1)
-        print("🗣️ Generating speech for Title...")
-        title_audio = os.path.abspath("temp/title.mp3")
-        title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
-        
-        title_card = os.path.abspath("temp/title_card.png")
-        await render_html_to_card_png(story_data, title_card, context)
-
-        # 2. Descarregar vídeo curtet de r/oddlysatisfying amb RedDownloader
-        bg_video_path = await fetch_oddlysatisfying_background(context)
-
-        await browser.close()
+    # 2. Descarregar vídeo curtet de r/oddlysatisfying
+    bg_video_path = fetch_oddlysatisfying_background()
 
     # 3. Història amb subtítols Pop-In
     print("🗣️ Generating speech for Story...")

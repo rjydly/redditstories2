@@ -1,0 +1,215 @@
+================================================================================
+DOCUMENT TÈCNIC DE CONTEXT I MEMÒRIA DEL PROJECTE: REDDIT VIDEO GENERATOR BOT
+================================================================================
+DESTINATARI: Altres models de Llenguatge (LLMs), enginyers de software i agents IA.
+OBJECTIU: Documentar l'arquitectura, el propòsit, la lògica de generació i TOTS els
+errors comesos i resolts per evitar regressions en futures modificacions del codi.
+
+--------------------------------------------------------------------------------
+1. PROPÒSIT I FINALITAT DEL PROJECTE
+--------------------------------------------------------------------------------
+El projecte és un sistema d'automatització complet (sense dependències locals,
+executat de franc mitjançant GitHub Actions) que genera vídeos curts en format
+vertical (9:16 - 1080x1920) optimitzats per a la màxima retenció a TikTok,
+YouTube Shorts i Instagram Reels.
+
+Estructura narrativa i visual del vídeo final:
+1. Fase Títol (0s a ~7s):
+   - Es mostra una targeta quadrada (~1:1) amb disseny natiu de Reddit (plantilla
+     d'Engain) centrada a la pantalla sobre un vídeo de fons satisfactori.
+   - La targeta fa una animació de Pop-In (salt elàstic) a l'inici, es manté visible
+     mentre la veu en off llegeix el títol ganxo, i fa un Fade-Out suau just abans
+     d'acabar el títol.
+2. Fase Història / Confessió (7s fins al final, ~55s a 1m45s):
+   - La targeta desapareix per complet, deixant el fons de vídeo net.
+   - S'inicia la narració d'una història de confessió amb girs de guió (plot twists).
+   - Al centre de la pantalla apareixen subtítols animats paraula per paraula (1 by 1),
+     en majúscules, tipografia Impact/DejaVu gegant (86pt), en groc elèctric i amb
+     efecte físic de rebot (Pop-In bounce).
+3. Àudio:
+   - Veu en anglès femení jove (Microsoft Edge-TTS: en-US-JennyNeural).
+   - Accelerada a +35% (velocitat ~1.4x de TikTok per eliminar silencis morts).
+   - To lleugerament agut (+12Hz) per donar expressivitat i dinamisme juvenil.
+4. Fons:
+   - Vídeos de fons nets, d'alta qualitat, satisfactoris (oddly satisfying)
+     procedents d'un banc verificat a la carpeta 'assets/', garantint 0% de risc
+     d'anuncis encoberts o marques d'aigua.
+
+--------------------------------------------------------------------------------
+2. FITXERS DEL REPOSITORI I LES SEVES FUNCIONS
+--------------------------------------------------------------------------------
+1. 'main.py':
+   - Script central que coordina tot el pipeline: llegeix el CSV, sintetitza
+     l'àudio i timestamps amb Edge-TTS, renderitza la targeta HTML amb Playwright,
+     gestiona el fons de vídeo, genera el fitxer de subtítols .ass i munta el
+     vídeo final amb FFmpeg.
+2. 'stories.csv':
+   - Base de dades d'històries. Columnes:
+     'id,subreddit,author,upvotes,comments,title,story,status'.
+   - L'script cerca la primera fila amb status='pending', la processa i la
+     marca com a 'done'.
+3. 'used_backgrounds.txt':
+   - Fitxer d'historial on es registren els noms dels vídeos de fons utilitzats
+     per garantir que mai no es repeteixi el mateix fons.
+4. 'assets/':
+   - Carpeta on l'usuari puja els seus vídeos nets de fons (.mp4, .mov, etc.)
+     amb qualsevol nom.
+5. 'requirements.txt':
+   - Llibreries mínimes: edge-tts, playwright, feedparser, requests, yt-dlp, RedDownloader.
+6. '.github/workflows/generate.yml':
+   - Workflow de GitHub Actions que s'executa amb 'workflow_dispatch'. Instal·la
+     FFmpeg, Chromium, executa main.py, puja el vídeo generat a una GitHub Release
+     (evitant el límit de 50 MB de Telegram) i fa 'git push' automàtic dels fitxers
+     stories.csv i used_backgrounds.txt per persistir l'estat.
+
+--------------------------------------------------------------------------------
+3. HISTORIAL D'ERRORS COMESOS I COM ES VAN RESOLVER (MOLT IMPORTANT)
+--------------------------------------------------------------------------------
+Aquesta secció és vital perquè cap altre model torni a caure en les mateixes trampes:
+
+ERROR 1: Intents de descàrrega des de YouTube a GitHub Actions
+- Causa: Vam intentar descarregar fons de YouTube amb yt-dlp. Les màquines al
+  núvol de GitHub Actions utilitzen rangs d'IP de centres de dades de Microsoft Azure.
+  Google bloqueja automàticament aquestes IPs demanant:
+  "Sign in to confirm you're not a bot".
+- Solució: NO intentar mai fer web-scraping de YouTube en directe a GitHub Actions.
+  S'ha de fer servir contingut d'arxiu, servidors directes o fitxers locals a assets/.
+
+ERROR 2: Ús de Pillow per dibuixar la interfície de Reddit
+- Causa: Vam intentar replicar la targeta de Reddit dibuixant rectangles i textos
+  amb la llibreria Pillow. El resultat era rígid, sense proporcions reals, faltaven
+  fonts i els emojis de vot/comentari sortien com a quadrats trencats ([] tofu box).
+- Solució: Abandonar el dibuixat a mà amb Pillow. Vam crear una plantilla HTML/CSS
+  idèntica a la d'Engain, amb la font Inter, icones SVG incrustades pures, i la
+  renderitzem a PNG d'alta resolució en 1 segon amb Chromium mitjançant Playwright
+  en local (sense connectar a reddit.com ni dependre de cookies).
+
+ERROR 3: Targeta retallada als costats per la resolució Retina (Overflow)
+- Causa: Perquè la targeta es veiés nítida, Playwright la renderitzava amb
+  device_scale_factor=2 (820px * 2 = 1640px). Com que el vídeo vertical és de 1080px,
+  en posar-la sobre el vídeo sense reescalar a FFmpeg, la targeta mesurava 1640px i
+  els costats dret i esquerre quedaven completament fora de pantalla.
+- Solució: Afegir un filtre de reescalat a FFmpeg abans de l'overlay:
+  '[1:v]scale=880:-2[card]'. Això ajusta la targeta a 880px d'amplada i deixa un marge
+  net d'exactament 100px a cada costat del vídeo.
+
+ERROR 4: Subtítols que no apareixien (Llista de paraules buida)
+- Causa: La crida a edge_tts.Communicate() no tenia el paràmetre boundary="WordBoundary".
+  Per defecte, Edge-TTS només retornava esdeveniments de frases (SentenceBoundary),
+  fent que el filtre de WordBoundary retornés 0 paraules. Com que el fitxer .ass
+  estava buit, FFmpeg no mostrava res.
+- Solució: Cridar sempre:
+  edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH, boundary="WordBoundary")
+  A més, es va programar un fallback que calcula els timestamps proporcionalment si
+  mai falla la connexió.
+
+ERROR 5: Paraules compostes gegants als subtítols (ex: "TWENTY-TWO-YEAR-OLD")
+- Causa: Edge-TTS considera una paraula amb guions ("twenty-two-year-old") com un
+  sol token. En majúscules i amb lletra de 86pt, aquesta paraula única ocupava més
+  d'amplada que la pantalla del mòbil i quedava tallada.
+- Solució:
+  a) A stories.csv s'escriuen números en xifres ("22-year-old" en lloc de paraules).
+  b) A main.py, es desglossen automàticament els tokens amb guió ("-") dividint la
+     durada entre les parts (surt primer "22", després "YEAR", després "OLD").
+  c) S'aplica un override automàtic de mida (\fs) si alguna paraula supera 9 lletres.
+
+ERROR 6: La targeta va desaparèixer en afegir l'animació Pop-In / Fade-Out
+- Causa: Una imatge fixa (.png) per a FFmpeg només dura 1 sol fotograma (0.033s).
+  Quan vam afegir filtres de 'fade=t=out:st=6.0', FFmpeg detectava que el fitxer
+  d'imatge ja havia acabat al frame 0 i eliminava l'overlay per complet.
+- Solució: S'ha d'indicar a FFmpeg que l'input de la targeta és un bucle continu
+  de vídeo a 30fps durant els segons que dura el títol:
+  "-framerate 30 -loop 1 -t str(title_dur) -i title_card"
+  Així la targeta existeix durant tot el temps del títol i fa el Pop-In inicial
+  i el Fade-Out final de forma fluida.
+
+ERROR 7: Error de FFmpeg "Cannot edit existing files in-place" (Exit Code 234)
+- Causa: Una funció descarregava el fons a 'temp/bg.mp4' i retornava aquesta mateixa
+  ruta. Després, la funció main() tornava a executar FFmpeg agafant com a input (-i)
+  'temp/bg.mp4' i com a output 'temp/bg.mp4'. FFmpeg no permet sobreescriure un fitxer
+  sobre ell mateix alhora.
+- Solució: Comprovar que l'arxiu d'origen no sigui el mateix que el de destinació
+  abans de llançar la comanda de FFmpeg.
+
+ERROR 8: Error de ruta de RedDownloader ("tempreddit_bg.mp4")
+- Causa: En cridar RedDownloader.Download(url, output="reddit_bg", destination="temp"),
+  si la variable destination no acaba en barra ("temp/"), la llibreria concatena
+  directament el text: "temp" + "reddit_bg.mp4" = "tempreddit_bg.mp4". L'script buscava
+  "temp/reddit_bg.mp4" i es pensava que la descàrrega havia fallat.
+- Solució: Assegurar la barra final ("destination = temp_dir + os.sep") i afegir una
+  comprovació de rutes que cerqui tant "temp/reddit_bg.mp4" com "tempreddit_bg.mp4".
+
+ERROR 9: Temps de processament de 30 minuts (Descàrregues inútils)
+- Causa: Es volien vídeos <= 15s. L'script descarregava desenes de vídeos pesants de
+  Reddit en seqüència per internet amb RedDownloader (que executa MoviePy i triga molt)
+  i, com que gairebé tots duraven 20-30s, els descartava després de trigar 30s a baixar-los!
+- Solució: No descarregar desenes de vídeos a cegues. Amb els vídeos nets pujats a
+  'assets/', no es descarrega res per la xarxa: s'executa a l'instant en 20 segons.
+
+ERROR 10: Risc de publicitat encoberta i marques d'aigua
+- Causa: El web-scraping en directe de Reddit (especialment de subreddits secundaris)
+  acaba portant vídeos amb logos de TikTok, marques a la roba o publicitat de botigues.
+- Solució: L'estàndard professional per publicar 7 vídeos al dia sense supervisió és
+  tenir un banc de vídeos nets i verificats a la carpeta 'assets/'. El bot en tria un
+  de diferent a cada execució, l'anota a 'used_backgrounds.txt' i mai repeteix cap vídeo.
+
+ERROR 11: Error de sintaxi "asyncio.run(main())import os" (Línia 429)
+- Causa: En enganxar el codi nou a l'editor web de GitHub, es va afegir al final
+  de l'arxiu antic sense esborrar-lo prèviament.
+- Solució: Buidar completament el fitxer o eliminar i recrear 'main.py' des de zero.
+
+ERROR 12: Pèrdua d'estat entre execucions de GitHub Actions
+- Causa: GitHub Actions clona el repositori net a cada execució. Si l'script marca
+  una història com a "done" a stories.csv o afegeix un ID a used_backgrounds.txt,
+  aquests canvis es perdien si no es feia 'git push'.
+- Solució: Afegir un pas a '.github/workflows/generate.yml' amb un bot de git que
+  faci 'git commit' i 'git push' automàtic de 'stories.csv' i 'used_backgrounds.txt'.
+
+--------------------------------------------------------------------------------
+4. DETALLS DE DISSENY I VALORS EXACTES PER NO TOCAR
+--------------------------------------------------------------------------------
+A) Targeta de Reddit (HTML/CSS a build_card_html):
+   - Proporció: ~1:1 quadrada (width: 760px).
+   - Fons: rgba(255, 255, 255, 0.86) (efecte vidre translúcid).
+   - Vora: 1.5px solid rgba(255, 255, 255, 0.55), border-radius: 28px.
+   - Tipografia: Inter (Google Fonts).
+   - Títol: 33px, font-weight: 800, color: #11151A.
+   - Text post: 21px, color: #374151, tallat a ~22 paraules acabant en "...".
+   - Likes generats aleatòriament: f"{random.uniform(30.0, 160.0):.1f}k".
+   - Comentaris generats aleatòriament: f"{random.uniform(7.0, 20.0):.1f}k".
+   - Botons inferiors (Pills): Vots amb fletxes de contorn, bafarada de comentari,
+     medalla d'award i fletxa de compartir.
+
+B) Subtítols animats (generate_popin_word_subtitles):
+   - Format: ASS (Advanced SubStation Alpha).
+   - Una sola paraula a la vegada (\an5 al centre).
+   - Tipografia: Impact, mida 86pt, majúscules.
+   - Color: Groc brillant (&H0000FFFF&) amb vora negra gruixuda de 8px (\bord8).
+   - Animació Pop-In Bounce:
+     "{\fscx75\fscy75\t(0,70,\fscx125\fscy125)\t(70,140,\fscx100\fscy100)}"
+     (neix al 75%, explota al 125% en 70ms i rebota al 100% en 70ms més).
+   - Ajust automàtic de mida: Si la paraula té >= 9 lletres, s'ajusta amb \fs
+     perquè mai no surti pels costats de la pantalla.
+
+C) Comanda de muntatge FFmpeg (Render Final):
+   - Targeta escalada a 880px: scale=880:-2.
+   - Pop-in elàstic de la targeta: escala dinàmica amb eval=frame en 0.25s.
+   - Fade-In de la targeta en 0.15s; Fade-Out en els últims 0.35s abans d'acabar el títol.
+   - Subtítols incrustats amb el filtre subtitles='temp/captions.ass'.
+   - Còdec: libx264 amb -preset veryfast i -threads 0 per màxima velocitat.
+   - Resolució final: 1080x1920 (9:16 vertical mòbil pur).
+
+--------------------------------------------------------------------------------
+5. INSTRUCCIONS DE MANTENIMENT I OPERACIÓ
+--------------------------------------------------------------------------------
+1. Per afegir noves històries:
+   - Afegir files a 'stories.csv' amb títols ganxo i històries amb girs de guió
+     de 220 a 280 paraules (> 1m 30s de durada). Status inicial: 'pending'.
+2. Per afegir fons nous:
+   - Pujar fitxers de vídeo satisfactoris nets directament a la carpeta 'assets/'
+     (amb qualsevol nom i resolució).
+3. Per generar vídeos:
+   - Anar a la pestanya 'Actions' a GitHub i prémer 'Run workflow'.
+   - En menys d'1 minut es genera el vídeo i l'enllaç de descàrrega directa apareix
+     al resum de l'acció i a les Releases de GitHub.
+================================================================================

@@ -2,214 +2,321 @@
 DOCUMENT TÈCNIC DE CONTEXT I MEMÒRIA DEL PROJECTE: REDDIT VIDEO GENERATOR BOT
 ================================================================================
 DESTINATARI: Altres models de Llenguatge (LLMs), enginyers de software i agents IA.
-OBJECTIU: Documentar l'arquitectura, el propòsit, la lògica de generació i TOTS els
-errors comesos i resolts per evitar regressions en futures modificacions del codi.
+OBJECTIU: Documentar l'arquitectura, el propòsit, la lògica de generació, TOTS els
+errors històrics resolts, el sistema de mescla d'efectes de so (SFX) i l'anàlisi
+exhaustiva dels patrons de viralitat per redactar guions d'alta retenció.
 
 --------------------------------------------------------------------------------
 1. PROPÒSIT I FINALITAT DEL PROJECTE
 --------------------------------------------------------------------------------
-El projecte és un sistema d'automatització complet (sense dependències locals,
-executat de franc mitjançant GitHub Actions) que genera vídeos curts en format
-vertical (9:16 - 1080x1920) optimitzats per a la màxima retenció a TikTok,
-YouTube Shorts i Instagram Reels.
+El projecte és un sistema d'automatització complet (executat al núvol mitjançant
+GitHub Actions) que genera vídeos curts en format vertical (9:16 - 1080x1920)
+optimitzats per a la màxima retenció a TikTok, YouTube Shorts i Instagram Reels.
 
 Estructura narrativa i visual del vídeo final:
-1. Fase Títol (0s a ~7s):
+1. Fase Títol (0s a ~5-7s):
    - Es mostra una targeta quadrada (~1:1) amb disseny natiu de Reddit (plantilla
      d'Engain) centrada a la pantalla sobre un vídeo de fons satisfactori.
-   - La targeta fa una animació de Pop-In (salt elàstic) a l'inici, es manté visible
-     mentre la veu en off llegeix el títol ganxo, i fa un Fade-Out suau just abans
-     d'acabar el títol.
-2. Fase Història / Confessió (7s fins al final, ~55s a 1m45s):
+   - Animació de Pop-In (salt elàstic) a l'inici, es manté visible mentre la veu
+     en off llegeix el títol ganxo, i fa un Fade-Out suau just abans d'acabar el títol.
+2. Fase Història / Confessió (després del títol fins al final, ~50s a 1m45s):
    - La targeta desapareix per complet, deixant el fons de vídeo net.
-   - S'inicia la narració d'una història de confessió amb girs de guió (plot twists).
+   - S'inicia la narració d'una història amb alt impacte emocional o girs inesperats.
    - Al centre de la pantalla apareixen subtítols animats paraula per paraula (1 by 1),
      en majúscules, tipografia Impact/DejaVu gegant (86pt), en groc elèctric i amb
      efecte físic de rebot (Pop-In bounce).
-3. Àudio:
+3. Pista d'Àudio i Efectes de So (SFX):
    - Veu en anglès femení jove (Microsoft Edge-TTS: en-US-JennyNeural).
    - Accelerada a +35% (velocitat ~1.4x de TikTok per eliminar silencis morts).
    - To lleugerament agut (+12Hz) per donar expressivitat i dinamisme juvenil.
-4. Fons:
+   - Efectes de so dinàmics (SFX) superposats en punts clau de la narració
+     (fah, fart, android-ring, flirt) sense aturar mai el ritme ni tallar la veu.
+4. Fons de vídeo:
    - Vídeos de fons nets, d'alta qualitat, satisfactoris (oddly satisfying)
-     procedents d'un banc verificat a la carpeta 'assets/', garantint 0% de risc
-     d'anuncis encoberts o marques d'aigua.
+     procedents de la carpeta 'assets/', garantint 0% de risc d'anuncis o marques d'aigua.
 
 --------------------------------------------------------------------------------
 2. FITXERS DEL REPOSITORI I LES SEVES FUNCIONS
 --------------------------------------------------------------------------------
 1. 'main.py':
-   - Script central que coordina tot el pipeline: llegeix el CSV, sintetitza
-     l'àudio i timestamps amb Edge-TTS, renderitza la targeta HTML amb Playwright,
-     gestiona el fons de vídeo, genera el fitxer de subtítols .ass i munta el
-     vídeo final amb FFmpeg.
+   - Script central que coordina tot el pipeline: llegeix el CSV, separa i neteja
+     les etiquetes SFX, sintetitza l'àudio i timestamps amb Edge-TTS, renderitza
+     la targeta HTML amb Playwright, mescla els efectes de so amb pydub, genera el
+     fitxer de subtítols .ass i munta el vídeo final amb FFmpeg.
 2. 'stories.csv':
    - Base de dades d'històries. Columnes:
      'id,subreddit,author,upvotes,comments,title,story,status'.
-   - L'script cerca la primera fila amb status='pending', la processa i la
-     marca com a 'done'.
+   - L'script cerca la primera fila amb status='pending', la processa i la marca com a 'done'.
 3. 'used_backgrounds.txt':
    - Fitxer d'historial on es registren els noms dels vídeos de fons utilitzats
-     per garantir que mai no es repeteixi el mateix fons.
+     per evitar repeticions.
 4. 'assets/':
-   - Carpeta on l'usuari puja els seus vídeos nets de fons (.mp4, .mov, etc.)
-     amb qualsevol nom.
+   - 'assets/': Carpeta de vídeos de fons (.mp4, .mov) nets de l'usuari.
+   - 'assets/audio/' (o 'assets/audios/'): Carpeta amb els 4 efectes de so
+     oficials en format .mp3 o .wav:
+     * 'fah.mp3': Gir dramàtic / absurd.
+     * 'fart.mp3': Moment ridícul, xorra o humiliant (embarrassing).
+     * 'android-ring.mp3': Notificació, trucada o missatge secret.
+     * 'flirt.mp3': Seducció, insinuació o coqueteig.
 5. 'requirements.txt':
-   - Llibreries mínimes: edge-tts, playwright, feedparser, requests, yt-dlp, RedDownloader.
+   - edge-tts, playwright, feedparser, requests, yt-dlp, RedDownloader, pydub.
 6. '.github/workflows/generate.yml':
    - Workflow de GitHub Actions que s'executa amb 'workflow_dispatch'. Instal·la
-     FFmpeg, Chromium, executa main.py, puja el vídeo generat a una GitHub Release
-     (evitant el límit de 50 MB de Telegram) i fa 'git push' automàtic dels fitxers
-     stories.csv i used_backgrounds.txt per persistir l'estat.
+     FFmpeg, Chromium, dependències Python, executa main.py, publica el vídeo a una
+     GitHub Release i fa git push automàtic dels fitxers modificats.
 
 --------------------------------------------------------------------------------
-3. HISTORIAL D'ERRORS COMESOS I COM ES VAN RESOLVER (MOLT IMPORTANT)
+3. HISTORIAL D'ERRORS COMESOS I COM ES VAN RESOLVER (CRÍTIC)
 --------------------------------------------------------------------------------
-Aquesta secció és vital perquè cap altre model torni a caure en les mateixes trampes:
-
 ERROR 1: Intents de descàrrega des de YouTube a GitHub Actions
-- Causa: Vam intentar descarregar fons de YouTube amb yt-dlp. Les màquines al
-  núvol de GitHub Actions utilitzen rangs d'IP de centres de dades de Microsoft Azure.
-  Google bloqueja automàticament aquestes IPs demanant:
-  "Sign in to confirm you're not a bot".
-- Solució: NO intentar mai fer web-scraping de YouTube en directe a GitHub Actions.
-  S'ha de fer servir contingut d'arxiu, servidors directes o fitxers locals a assets/.
+- Causa: Google bloqueja automàticament les IPs dels centres de dades de GitHub Actions.
+- Solució: NO fer scraping de YouTube en directe. Utilitzar fitxers locals a assets/.
 
 ERROR 2: Ús de Pillow per dibuixar la interfície de Reddit
-- Causa: Vam intentar replicar la targeta de Reddit dibuixant rectangles i textos
-  amb la llibreria Pillow. El resultat era rígid, sense proporcions reals, faltaven
-  fonts i els emojis de vot/comentari sortien com a quadrats trencats ([] tofu box).
-- Solució: Abandonar el dibuixat a mà amb Pillow. Vam crear una plantilla HTML/CSS
-  idèntica a la d'Engain, amb la font Inter, icones SVG incrustades pures, i la
-  renderitzem a PNG d'alta resolució en 1 segon amb Chromium mitjançant Playwright
-  en local (sense connectar a reddit.com ni dependre de cookies).
+- Causa: Pillow generava dissenys rígids i trencava emojis i caràcters especials.
+- Solució: Plantilla HTML/CSS nativa amb font Inter i icones SVG pures, renderitzada
+  amb Playwright (Chromium headless) a PNG d'alta definició.
 
 ERROR 3: Targeta retallada als costats per la resolució Retina (Overflow)
-- Causa: Perquè la targeta es veiés nítida, Playwright la renderitzava amb
-  device_scale_factor=2 (820px * 2 = 1640px). Com que el vídeo vertical és de 1080px,
-  en posar-la sobre el vídeo sense reescalar a FFmpeg, la targeta mesurava 1640px i
-  els costats dret i esquerre quedaven completament fora de pantalla.
-- Solució: Afegir un filtre de reescalat a FFmpeg abans de l'overlay:
-  '[1:v]scale=880:-2[card]'. Això ajusta la targeta a 880px d'amplada i deixa un marge
-  net d'exactament 100px a cada costat del vídeo.
+- Causa: Playwright renderitzava amb device_scale_factor=2 (1640px en un vídeo de 1080px).
+- Solució: Escalar a FFmpeg: '[1:v]scale=880:-2[card]'. Deixa 100px nets a cada costat.
 
 ERROR 4: Subtítols que no apareixien (Llista de paraules buida)
-- Causa: La crida a edge_tts.Communicate() no tenia el paràmetre boundary="WordBoundary".
-  Per defecte, Edge-TTS només retornava esdeveniments de frases (SentenceBoundary),
-  fent que el filtre de WordBoundary retornés 0 paraules. Com que el fitxer .ass
-  estava buit, FFmpeg no mostrava res.
-- Solució: Cridar sempre:
-  edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH, boundary="WordBoundary")
-  A més, es va programar un fallback que calcula els timestamps proporcionalment si
-  mai falla la connexió.
+- Causa: Faltava el paràmetre boundary="WordBoundary" a edge_tts.Communicate().
+- Solució: Cridar sempre amb boundary="WordBoundary" i afegir càlcul de fallback proporcional.
 
 ERROR 5: Paraules compostes gegants als subtítols (ex: "TWENTY-TWO-YEAR-OLD")
-- Causa: Edge-TTS considera una paraula amb guions ("twenty-two-year-old") com un
-  sol token. En majúscules i amb lletra de 86pt, aquesta paraula única ocupava més
-  d'amplada que la pantalla del mòbil i quedava tallada.
-- Solució:
-  a) A stories.csv s'escriuen números en xifres ("22-year-old" en lloc de paraules).
-  b) A main.py, es desglossen automàticament els tokens amb guió ("-") dividint la
-     durada entre les parts (surt primer "22", després "YEAR", després "OLD").
-  c) S'aplica un override automàtic de mida (\fs) si alguna paraula supera 9 lletres.
+- Causa: Edge-TTS tracta paraules compostes amb guió com un únic token de 86pt que se surt de pantalla.
+- Solució: Escriure números sempre en xifres ('22-year-old'), desglossar tokens amb guió a
+  main.py dividint la durada, i aplicar override \fs si alguna paraula supera les 9 lletres.
 
 ERROR 6: La targeta va desaparèixer en afegir l'animació Pop-In / Fade-Out
-- Causa: Una imatge fixa (.png) per a FFmpeg només dura 1 sol fotograma (0.033s).
-  Quan vam afegir filtres de 'fade=t=out:st=6.0', FFmpeg detectava que el fitxer
-  d'imatge ja havia acabat al frame 0 i eliminava l'overlay per complet.
-- Solució: S'ha d'indicar a FFmpeg que l'input de la targeta és un bucle continu
-  de vídeo a 30fps durant els segons que dura el títol:
-  "-framerate 30 -loop 1 -t str(title_dur) -i title_card"
-  Així la targeta existeix durant tot el temps del títol i fa el Pop-In inicial
-  i el Fade-Out final de forma fluida.
+- Causa: Una imatge PNG estàtica per a FFmpeg només dura 1 sol fotograma (0.033s).
+- Solució: Forçar bucle a l'input de FFmpeg: "-framerate 30 -loop 1 -t str(title_dur) -i title_card".
 
 ERROR 7: Error de FFmpeg "Cannot edit existing files in-place" (Exit Code 234)
-- Causa: Una funció descarregava el fons a 'temp/bg.mp4' i retornava aquesta mateixa
-  ruta. Després, la funció main() tornava a executar FFmpeg agafant com a input (-i)
-  'temp/bg.mp4' i com a output 'temp/bg.mp4'. FFmpeg no permet sobreescriure un fitxer
-  sobre ell mateix alhora.
-- Solució: Comprovar que l'arxiu d'origen no sigui el mateix que el de destinació
-  abans de llançar la comanda de FFmpeg.
+- Causa: Intentar llegir i escriure sobre el mateix fitxer temporal alhora.
+- Solució: Assegurar rutes d'entrada i sortida independents a cada pas intermedi.
 
 ERROR 8: Error de ruta de RedDownloader ("tempreddit_bg.mp4")
-- Causa: En cridar RedDownloader.Download(url, output="reddit_bg", destination="temp"),
-  si la variable destination no acaba en barra ("temp/"), la llibreria concatena
-  directament el text: "temp" + "reddit_bg.mp4" = "tempreddit_bg.mp4". L'script buscava
-  "temp/reddit_bg.mp4" i es pensava que la descàrrega havia fallat.
-- Solució: Assegurar la barra final ("destination = temp_dir + os.sep") i afegir una
-  comprovació de rutes que cerqui tant "temp/reddit_bg.mp4" com "tempreddit_bg.mp4".
+- Causa: Manca de barra de separació final a la variable de destí.
+- Solució: Assegurar la barra final ("destination = temp_dir + os.sep").
 
-ERROR 9: Temps de processament de 30 minuts (Descàrregues inútils)
-- Causa: Es volien vídeos <= 15s. L'script descarregava desenes de vídeos pesants de
-  Reddit en seqüència per internet amb RedDownloader (que executa MoviePy i triga molt)
-  i, com que gairebé tots duraven 20-30s, els descartava després de trigar 30s a baixar-los!
-- Solució: No descarregar desenes de vídeos a cegues. Amb els vídeos nets pujats a
-  'assets/', no es descarrega res per la xarxa: s'executa a l'instant en 20 segons.
+ERROR 9: Temps de processament excessiu per descàrregues inútils
+- Causa: Descarregar vídeos llargs per descartar-los després.
+- Solució: Usar vídeos verificats locals d'assets/. L'execució triga menys d'1 minut.
 
-ERROR 10: Risc de publicitat encoberta i marques d'aigua
-- Causa: El web-scraping en directe de Reddit (especialment de subreddits secundaris)
-  acaba portant vídeos amb logos de TikTok, marques a la roba o publicitat de botigues.
-- Solució: L'estàndard professional per publicar 7 vídeos al dia sense supervisió és
-  tenir un banc de vídeos nets i verificats a la carpeta 'assets/'. El bot en tria un
-  de diferent a cada execució, l'anota a 'used_backgrounds.txt' i mai repeteix cap vídeo.
+ERROR 10: Risc de publicitat encoberta i marques d'aigua de tercers
+- Causa: Scraping indiscriminat de Reddit.
+- Solució: Banc local de vídeos sans i nets a 'assets/', amb rotació controlada.
 
-ERROR 11: Error de sintaxi "asyncio.run(main())import os" (Línia 429)
-- Causa: En enganxar el codi nou a l'editor web de GitHub, es va afegir al final
-  de l'arxiu antic sense esborrar-lo prèviament.
-- Solució: Buidar completament el fitxer o eliminar i recrear 'main.py' des de zero.
+ERROR 11: Error de sintaxi per duplicació de codi en edició web
+- Causa: Enganxar contingut sense esborrar el text previ a GitHub.
+- Solució: Assegurar fitxers complets i nets abans de commitejar.
 
 ERROR 12: Pèrdua d'estat entre execucions de GitHub Actions
-- Causa: GitHub Actions clona el repositori net a cada execució. Si l'script marca
-  una història com a "done" a stories.csv o afegeix un ID a used_backgrounds.txt,
-  aquests canvis es perdien si no es feia 'git push'.
-- Solució: Afegir un pas a '.github/workflows/generate.yml' amb un bot de git que
-  faci 'git commit' i 'git push' automàtic de 'stories.csv' i 'used_backgrounds.txt'.
+- Causa: Les instàncies d'Actions són efímeres; els canvis a stories.csv es perdien.
+- Solució: Pas final a generate.yml amb bot de git que fa commit i push de stories.csv
+  i used_backgrounds.txt amb 'git pull --rebase' per evitar conflictes.
+
+ERROR 13: Etiquetes SFX llegides per Edge-TTS o visibles a la targeta HTML
+- Causa: Si el text cru conté marques com '[sfx:fah]', la veu intenta pronunciar-les
+  i la targeta de Reddit les mostra com a text brut, trencant la professionalitat.
+- Solució: Funció 'strip_sfx_tags()' mitjançant regex abans d'enviar el text a
+  Edge-TTS i a la plantilla HTML. Les marques només s'utilitzen internament per
+  calcular els segons exactes de l'efecte de so.
+
+ERROR 14: Pausa o tall de la veu durant els efectes de so
+- Causa: Si s'intenta concatenar els efectes de so en sèrie, la narració s'atura
+  mentre sona l'efecte, arruïnant el ritme de TikTok.
+- Solució: La veu ha de generar-se contínua. Els efectes es mesclen en paral·lel
+  per sobre de la pista vocal mitjançant 'pydub.overlay' al mil·lisegon exacte.
 
 --------------------------------------------------------------------------------
 4. DETALLS DE DISSENY I VALORS EXACTES PER NO TOCAR
 --------------------------------------------------------------------------------
 A) Targeta de Reddit (HTML/CSS a build_card_html):
    - Proporció: ~1:1 quadrada (width: 760px).
-   - Fons: rgba(255, 255, 255, 0.86) (efecte vidre translúcid).
+   - Fons: rgba(255, 255, 255, 0.86) (vidre translúcid).
    - Vora: 1.5px solid rgba(255, 255, 255, 0.55), border-radius: 28px.
-   - Tipografia: Inter (Google Fonts).
-   - Títol: 33px, font-weight: 800, color: #11151A.
-   - Text post: 21px, color: #374151, tallat a ~22 paraules acabant en "...".
-   - Likes generats aleatòriament: f"{random.uniform(30.0, 160.0):.1f}k".
-   - Comentaris generats aleatòriament: f"{random.uniform(7.0, 20.0):.1f}k".
-   - Botons inferiors (Pills): Vots amb fletxes de contorn, bafarada de comentari,
-     medalla d'award i fletxa de compartir.
+   - Font: Inter. Títol a 33px font-weight: 800.
+   - Cos de text truncat a ~22 paraules acabant en '...'.
+   - Mètriques simulades dinàmiques: Likes (30k-160k) i Comentaris (7k-20k).
+   - Icones SVG incrustades pures (fletxes de vot, bafarada, medalla, compartir).
 
 B) Subtítols animats (generate_popin_word_subtitles):
-   - Format: ASS (Advanced SubStation Alpha).
-   - Una sola paraula a la vegada (\an5 al centre).
-   - Tipografia: Impact, mida 86pt, majúscules.
-   - Color: Groc brillant (&H0000FFFF&) amb vora negra gruixuda de 8px (\bord8).
-   - Animació Pop-In Bounce:
+   - Format: ASS (Advanced SubStation Alpha), alineació central (\an5).
+   - Paraula per paraula (1 by 1). Font: Impact, 86pt, majúscules.
+   - Color: Groc elèctric (&H0000FFFF&) amb vora negra gruixuda de 8px (\bord8).
+   - Animació física de rebot (Pop-In):
      "{\fscx75\fscy75\t(0,70,\fscx125\fscy125)\t(70,140,\fscx100\fscy100)}"
-     (neix al 75%, explota al 125% en 70ms i rebota al 100% en 70ms més).
-   - Ajust automàtic de mida: Si la paraula té >= 9 lletres, s'ajusta amb \fs
-     perquè mai no surti pels costats de la pantalla.
+   - Ajust dinàmic de mida si la paraula té >= 9 caràcters (\fs).
 
-C) Comanda de muntatge FFmpeg (Render Final):
-   - Targeta escalada a 880px: scale=880:-2.
-   - Pop-in elàstic de la targeta: escala dinàmica amb eval=frame en 0.25s.
-   - Fade-In de la targeta en 0.15s; Fade-Out en els últims 0.35s abans d'acabar el títol.
-   - Subtítols incrustats amb el filtre subtitles='temp/captions.ass'.
-   - Còdec: libx264 amb -preset veryfast i -threads 0 per màxima velocitat.
-   - Resolució final: 1080x1920 (9:16 vertical mòbil pur).
+C) Sistema d'Efectes de So (SFX):
+   - Sintaxi al guió: [sfx:nom_so] (ex: [sfx:fah], [sfx:fart], [sfx:android-ring], [sfx:flirt]).
+   - Ubicació de fitxers: 'assets/audio/' (o 'assets/audios/').
+   - Detecció temporal: Es vincula a l'índex de la paraula adjacent mitjançant
+     els timestamps de WordBoundary d'Edge-TTS.
+   - Ajust de volum: -2 dB sobre els SFX per no tapar la claredat vocal.
+   - Pista contínua: Mai s'interromp la veu de JennyNeural.
+
+D) Renderització final FFmpeg:
+   - Targeta escalada a 880px d'amplada: scale=w='trunc((880 * ...)/2)*2':h=-2.
+   - Pop-In elàstic en 0.25s; Fade-In en 0.15s; Fade-Out en els últims 0.35s del títol.
+   - Resolució de sortida: 1080x1920 (9:16 vertical pur, 30fps).
+   - Còdec: libx264, preset veryfast, àudio AAC.
 
 --------------------------------------------------------------------------------
-5. INSTRUCCIONS DE MANTENIMENT I OPERACIÓ
+5. MANUAL CIENTÍFIC I PATRONS DE VIRALITAT (ENGINYERIA DE GUIONS DE MÀXIMA RETENCIÓ)
+--------------------------------------------------------------------------------
+Aquest apartat sintetitza els patrons psicològics i algorítmics extrets de
+l'anàlisi de vídeos de Reddit amb milions de reproduccions a TikTok, Shorts i Reels.
+
+================================================================================
+A) L'ANATOMIA DEL HOOK (SEGONS 0 A 3: LA TAXA DE SUPERVIVÈNCIA DEL SWIPE)
+================================================================================
+El 70% dels usuaris fan lliscar el dit (swipe) abans del segon 3 si no detecten
+un conflicte immediat. No hi ha espai per a salutacions ("Hi guys"), presentacions
+lentes ("Today I want to share something that happened to me") ni context innecessari.
+
+Regles d'or del ganxo:
+1. El principi del "Contrast Absurd / Xoc Immediat":
+   - Posar cara a cara dos conceptes incompatibles en la primera frase.
+   - Exemple d'èxit: "My 18-year-old daughter walked into the room and begged me
+     to disown her and kick her out." -> L'oient es pregunta a l'instant: "Per què
+     una filla voldria ser desheretada voluntàriament?"
+2. La Confessió Tabú o Moralment Qüestionable:
+   - Declarar una acció socialment incorrecta que obliga l'usuari a quedar-se per jutjar.
+   - Exemple: "My friend caught me sniffing his sister's clothes..." o "I know this
+     was a huge violation of privacy, but that night I crept in and searched her phone."
+3. La Falsa Calma / El "Close Call":
+   - Insinuar una amenaça terrorífica sobre un ésser vulnerable.
+   - Exemple: "My 5-year-old daughter kept saying a strange man climbed into our
+     house at night to hurt her brother."
+
+================================================================================
+B) ELS 5 ARQUETIPS NARRATIUS DE VIRALITAT VALIDATS
+================================================================================
+
+1. ARQUETIP 1: LA SUBVERSIÓ D'EXPECTATIVES (THE BAIT-AND-SWITCH)
+   - Concepte: L'espectador construeix una hipòtesi dramàtica greu durant el 80%
+     del vídeo, i l'última frase destrueix la hipòtesi amb un detall còmic o absurd.
+   - Estructura:
+     * Inici: Demandes extremes de càstig, pànic o desesperació familiar.
+     * Desenvolupament: El pare/protagonista imagina crims federals o sectes perilloses.
+     * Gir [sfx:fah] / [sfx:fart]: El culpable és un detall mundà (el xicot és del
+       Manchester United, o és un "influencer" de crypto que s'ha arruïnat).
+   - Efecte algorítmic: Genera una riallada sobtada i incentiva el botó de compartir
+     (Shares) a amics per fer la broma.
+
+2. ARQUETIP 2: EL "CLOSE CALL" (DE L'HORROR A L'ALIVIAMENT / VERGONYA)
+   - Concepte: Una situació que sembla criminal o letal es resol amb una veritat
+     humana íntima o còmicament incòmode.
+   - Estructura:
+     * Fase sospita: Pistes inquietants (finestres obertes, sorolls a la nit).
+     * Escalada d'acció: L'arribada al punt de màxima tensió física (escopeta
+       carregada, peu a la porta, a punt de prémer el gallet).
+     * Revelació [sfx:fah]: Es desemmascara l'intrús; no hi ha cap agressor.
+     * Cringe / Embarrassing [sfx:fart]: S'entén el motiu real (era la parella
+       secreta del fill; es descobreix que el fill és gai).
+   - Efecte algorítmic: Retenció brutal (Watch Time) durant els segons centrals
+     perquè el cervell humà necessita saber si algú morirà o serà ferit.
+
+3. ARQUETIP 3: LA FORTUNA OCULTA I LA GENEROSITAT SECRETA
+   - Concepte: Un personatge quotidià que sembla humil amaga un estatus colossal i
+     actua com a àngel protector sense buscar reconeixement.
+   - Estructura:
+     * Dissonància inicial: Persona humil (treballadora de menjador escolar o noia
+       amb cotxe atrotinat) que té accessoris o sabates de luxe inexplicables.
+     * Crisi del protagonista: Ruïna financera, impossibilitat de pagar la universitat.
+     * Miracles anònims [sfx:fah]: Beques completes, portàtils reparats.
+     * Clímax pòstum o revelació: El funeral ple de centenars d'estudiants o la mansió
+       amb seguretat privada.
+   - Efecte algorítmic: Càrrega emocional molt alta (uplifting/wholesome). Provoca
+     comentaris de gent explicant les seves pròpies experiències familiars.
+
+4. ARQUETIP 4: EL KARMA IMPLACABLE I LA DESTRUCCIÓ DE L'ARROGANT
+   - Concepte: Un personatge pedant, abusador o arrogant és humiliat per la seva
+     pròpia incompetència davant testimonis.
+   - Estructura:
+     * Presentació del "dolent": El cap narcisista que presumeix de coeficient
+       intel·lectual o el veí que roba el Wi-Fi i se'n burla.
+     * La trampa subtil: Una pregunta teòrica senzilla o una pàgina d'alerta de router.
+     * Ridícul públic [sfx:fart]: El personatge no comprèn conceptes bàsics o entra
+       en pànic absurd.
+     * Clímax kàrmic [sfx:fah]: El seu cotxe de luxe encès al pàrquing sense vigilància
+       o el portàtil passat per l'aigua de l'aixeta per "netejar un virus".
+   - Efecte algorítmic: Justícia poètica pura. L'audiència sent satisfacció
+     psicològica i mira el vídeo fins a l'últim fotograma.
+
+5. ARQUETIP 5: LA VULNERABILITAT PROFUNDA I L'AMOR INCONDICIONAL
+   - Concepte: La desmitificació de les relacions idíl·liques mostrant el suport
+     brutal durant crisis mèdiques o psicològiques greus.
+   - Estructura:
+     * Degeneració silenciosa: La parella perd pes, deixa de parlar, amaga pastilles.
+     * Crisi a les 3 AM: Trobar-la a les fosques; ingrés hospitalari involuntari.
+     * Resiliència ingrata: Suport diari malgrat rebre crits i odi temporal.
+     * Petita victòria [sfx:android-ring] -> [sfx:fah]: Una carta o missatge d'agraïment
+       programat en el moment més fosc.
+   - Efecte algorítmic: Genera connexió íntima profunda, comentaris llargs de la
+     comunitat i taxes de desament (Saves) molt elevades.
+
+================================================================================
+C) LA PSICOLOGIA DE LA SECCIÓ DE COMENTARIS (ENGAGEMENT HACKING)
+================================================================================
+L'algorisme de TikTok i Instagram Reels premia un vídeo quan els usuaris comencen
+a discutir entre ells a la secció de comentaris mentre el vídeo es reprodueix
+en bucle al fons (disparant la mètrica de Watch Time > 100%).
+
+Tècniques incorporades als guions per activar comentaris:
+1. El Dilema Moral No Resolut:
+   - Actes com "espiar el mòbil d'un fill" o "ingressar la dona a l'hospital en contra
+     de la seva voluntat" divideixen la comunitat entre els que defensen la privacitat
+     i els que prioritzen la seguretat.
+2. La Identificació Universal de Ràbia:
+   - Mencionar patrons tòxics comuns (persones que presumeixen d'IQ, parelles
+     infidels, veïns morosos). Els usuaris etiqueten els seus amics o comenten:
+     "Això és exactament el que em va fer el meu ex".
+3. El Gir que obliga a re-mirar el vídeo:
+   - Quan es descobreix que el personatge feia trampes o que el narrador sabia la
+     veritat des del principi, l'usuari torna a mirar l'inici per buscar les pistes.
+
+================================================================================
+D) COREOGRAFIA AUDIOVISUAL DELS EFECTES DE SO (SFX PACING)
+================================================================================
+Els efectes de so NO s'han de posar a l'atzar; funcionen com a descàrregues de dopamina:
+- '[sfx:android-ring]': S'ha de col·locar just abans que arribi una informació crucial
+  (la trucada del banc, l'alerta del router, el missatge secret). Actua com a
+  interrupció narrativa que reactiva l'atenció auditiva.
+- '[sfx:fah]': S'ha de col·locar a la paraula exacta del clímax o revelació de la veritat
+  (quan es descobreix qui és l'advocada, la quantitat de diners o l'engany).
+- '[sfx:fart]': S'ha de col·locar quan un personatge és humiliat, fa el ridícul o es
+  troba en una situació profundament incòmode (cringe/embarrassing).
+- '[sfx:flirt]': S'ha de col·locar en gestos de seducció, picades d'ullet, somriures
+  còmplices o aproximacions romàntiques inesperades.
+
+================================================================================
+E) CHECKLIST INVIOLABLE PER A LA REDACCIÓ DE GUIONS A STORIES.CSV
+================================================================================
+1. Idioma: Anglès natiu fluid (optimitzat per a JennyNeural).
+2. Xifres numèriques: SEMPRE en xifres ('18', '2004', '80000', '120') en lloc de lletres
+   ('eighteen', 'two thousand four') per evitar subtítols desbordats.
+3. Longitud: Entre 180 i 250 paraules per guió (permet vídeos d'entre 55s i 1m20s a +35%).
+4. Sense cometes dobles internes sense escapar: Dins del CSV, utilitzar cometes simples o
+   dos punts per a diàlegs, evitant trencar l'estructura columnar del fitxer.
+5. Densitat: Eliminar tota paraula buida. Cada frase ha d'aportar una acció o una revelació.
+
+--------------------------------------------------------------------------------
+6. INSTRUCCIONS DE MANTENIMENT I OPERACIÓ
 --------------------------------------------------------------------------------
 1. Per afegir noves històries:
-   - Afegir files a 'stories.csv' amb títols ganxo i històries amb girs de guió
-     de 220 a 280 paraules (> 1m 30s de durada). Status inicial: 'pending'.
-2. Per afegir fons nous:
-   - Pujar fitxers de vídeo satisfactoris nets directament a la carpeta 'assets/'
-     (amb qualsevol nom i resolució).
+   - Afegir files a 'stories.csv' respectant les columnes i amb status='pending'.
+   - Incorporar estratègicament les marques [sfx:fah], [sfx:fart], [sfx:android-ring], [sfx:flirt].
+2. Per gestionar els àudios SFX:
+   - Assegurar que els fitxers 'fah.mp3', 'fart.mp3', 'android-ring.mp3' i 'flirt.mp3'
+     siguin a la carpeta 'assets/audio/'.
 3. Per generar vídeos:
-   - Anar a la pestanya 'Actions' a GitHub i prémer 'Run workflow'.
-   - En menys d'1 minut es genera el vídeo i l'enllaç de descàrrega directa apareix
-     al resum de l'acció i a les Releases de GitHub.
+   - Executar el workflow 'Generar Video Reddit' des de la pestanya Actions de GitHub.
+   - El vídeo final es publica automàticament a les Releases de GitHub amb enllaç
+     directe de descàrrega al resum de l'acció.
 ================================================================================

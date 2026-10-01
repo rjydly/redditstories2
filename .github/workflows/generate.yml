@@ -24,7 +24,7 @@ jobs:
       - name: Instal·lar FFmpeg i Fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-freefont-ttf
 
       - name: Instal·lar dependències Python
         run: pip install -r requirements.txt
@@ -55,7 +55,8 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add stories.csv used_backgrounds.txt || true
           git commit -m "Auto: actualitzar historial de fons i estat d'històries [skip ci]" || true
-          git push || true
+          git pull --rebase origin main || true
+          git push origin main || true
 
       - name: Mostrar Enllaç al Log i al Resum
         run: |

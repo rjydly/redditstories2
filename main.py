@@ -46,7 +46,13 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
         shutil.copy(base_audio_path, output_path)
         return output_path
 
-    possible_dirs = [os.path.abspath("assets/audio"), os.path.abspath("assets/audios")]
+    # Comprova tant la carpeta audios/ com assets/audios/ o assets/audio/
+    possible_dirs = [
+        os.path.abspath("audios"),
+        os.path.abspath("assets/audios"),
+        os.path.abspath("assets/audio"),
+        os.path.abspath("audio")
+    ]
     base = AudioSegment.from_file(base_audio_path)
 
     for timestamp_sec, sfx_name in sfx_events:
@@ -62,14 +68,15 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
                 break
                 
         if not sfx_path:
-            print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a assets/audio/")
+            print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a audios/ ni a assets/audios/")
             continue
 
         sfx_audio = AudioSegment.from_file(sfx_path)
         sfx_audio = sfx_audio - 2  # Atenuació de -2 dB per no trepitjar la veu
         pos_ms = max(0, int(timestamp_sec * 1000))
         base = base.overlay(sfx_audio, position=pos_ms)
-        print(f"🔊 SFX afegit: '{sfx_name}' al segon {timestamp_sec:.2f}s")
+        folder_found = os.path.basename(os.path.dirname(sfx_path))
+        print(f"🔊 SFX afegit: '{sfx_name}' al segon {timestamp_sec:.2f}s (des de {folder_found}/)")
 
     base.export(output_path, format="mp3")
     return output_path
@@ -483,7 +490,8 @@ def get_sfx_timestamp(word_idx, words_list, fallback_time):
 
 async def main():
     os.makedirs("temp", exist_ok=True)
-    os.makedirs("assets/audio", exist_ok=True)
+    os.makedirs("audios", exist_ok=True)
+    os.makedirs("assets/audios", exist_ok=True)
     
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")

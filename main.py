@@ -3,23 +3,78 @@ import re
 import sys
 import csv
 import random
+import shutil
 import asyncio
 import subprocess
 import edge_tts
-import feedparser
 from playwright.async_api import async_playwright
+from pydub import AudioSegment
 
 VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
 VOICE_RATE = os.getenv("TTS_RATE", "+35%")
 VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
 
-SPAM_KEYWORDS = [
-    "tiktok", "@", "watermark", "credit", "promo", "shop", "buy", "store",
-    "follow", "link in", "discount", "amazon", "product", "gadget", "brand"
-]
+def strip_sfx_tags(text):
+    """Elimina les etiquetes [sfx:nom] per al text visual de la targeta."""
+    cleaned = re.sub(r'\[sfx:\s*[\w\-]+\]', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s+([.,!?;:])', r'\1', cleaned)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+def parse_text_and_sfx(text):
+    """
+    Extreu el text net per a la veu i calcula l'índex de paraula exacte
+    on s'ha de disparar cada efecte de so.
+    """
+    sfx_pattern = re.compile(r'\[sfx:\s*([\w\-]+)\]', re.IGNORECASE)
+    sfx_markers = []
+    
+    for match in sfx_pattern.finditer(text):
+        sfx_name = match.group(1).lower()
+        text_before = text[:match.start()]
+        clean_before = sfx_pattern.sub('', text_before)
+        word_count = len(clean_before.split())
+        sfx_markers.append((word_count, sfx_name))
+        
+    clean_text = sfx_pattern.sub('', text)
+    clean_text = re.sub(r'\s+([.,!?;:])', r'\1', clean_text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    return clean_text, sfx_markers
+
+def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
+    """Barreja els efectes de so sobre la veu contínua sense interrompre-la."""
+    if not sfx_events:
+        shutil.copy(base_audio_path, output_path)
+        return output_path
+
+    possible_dirs = [os.path.abspath("assets/audio"), os.path.abspath("assets/audios")]
+    base = AudioSegment.from_file(base_audio_path)
+
+    for timestamp_sec, sfx_name in sfx_events:
+        sfx_path = None
+        for d in possible_dirs:
+            if os.path.exists(d):
+                for ext in [".mp3", ".wav", ".ogg", ".aac", ".m4a"]:
+                    candidate = os.path.join(d, f"{sfx_name}{ext}")
+                    if os.path.exists(candidate):
+                        sfx_path = candidate
+                        break
+            if sfx_path:
+                break
+                
+        if not sfx_path:
+            print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a assets/audio/")
+            continue
+
+        sfx_audio = AudioSegment.from_file(sfx_path)
+        sfx_audio = sfx_audio - 2  # Atenuació de -2 dB per no trepitjar la veu
+        pos_ms = max(0, int(timestamp_sec * 1000))
+        base = base.overlay(sfx_audio, position=pos_ms)
+        print(f"🔊 SFX afegit: '{sfx_name}' al segon {timestamp_sec:.2f}s")
+
+    base.export(output_path, format="mp3")
+    return output_path
 
 def get_story_from_csv(csv_path="stories.csv"):
-    """Llegeix la primera història pendent del CSV."""
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"No s'ha trobat el fitxer {csv_path}.")
 
@@ -36,6 +91,8 @@ def get_story_from_csv(csv_path="stories.csv"):
             rows.append(row)
 
     if not selected_story:
+        if not rows:
+            raise ValueError("El fitxer stories.csv està buit.")
         selected_story = rows[0]
 
     with open(csv_path, mode="w", encoding="utf-8", newline="") as f:
@@ -45,21 +102,7 @@ def get_story_from_csv(csv_path="stories.csv"):
 
     return selected_story
 
-def get_clip_duration(file_path):
-    """Retorna la durada d'un fitxer de vídeo."""
-    try:
-        res = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        return float(res.stdout.strip())
-    except:
-        return 0.0
-
 def find_all_asset_videos():
-    """Troba tots els vídeos dins de la carpeta assets/ amb qualsevol títol o extensió."""
     search_dirs = ["assets", "assets/backgrounds"]
     found = []
     for d in search_dirs:
@@ -68,17 +111,11 @@ def find_all_asset_videos():
                 for f in files:
                     if f.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
                         full_path = os.path.join(root, f)
-                        # Ignorem temporals o targetes
                         if not any(x in f.lower() for x in ["temp", "final_video", "title_card"]):
                             found.append(full_path)
     return list(set(found))
 
 def get_clean_background_video(target_duration):
-    """
-    1. Revisa prioritàriament els teus vídeos pujats a assets/ (amb títols random).
-    2. Rota entre ells usant used_backgrounds.txt per no repetir-los.
-    3. Si s'han fet servir tots, reinicia el cicle automàticament.
-    """
     temp_dir = os.path.abspath("temp")
     os.makedirs(temp_dir, exist_ok=True)
     temp_bg = os.path.join(temp_dir, "bg.mp4")
@@ -89,19 +126,14 @@ def get_clean_background_video(target_duration):
         with open(used_file, "r", encoding="utf-8") as f:
             used_items = set(line.strip() for line in f if line.strip())
 
-    # --- 1. BUSCAR VÍDEOS A ASSETS/ (PRIORITAT MÀXIMA) ---
     local_vids = find_all_asset_videos()
     if local_vids:
         print(f"📁 S'han detectat {len(local_vids)} vídeos a la carpeta assets/")
-        
-        # Filtrem els que encara no s'hagin fet servir
         unused_vids = [v for v in local_vids if os.path.basename(v) not in used_items]
         
-        # Si ja s'han utilitzat tots els vídeos disponibles d'assets, reiniciem el cicle!
         if not unused_vids:
             print("🔄 S'han utilitzat tots els vídeos d'assets! Reiniciant el cicle de rotació...")
             unused_vids = local_vids
-            # Netejar l'historial de fitxers locals al fitxer
             with open(used_file, "w", encoding="utf-8") as f:
                 f.write("")
 
@@ -122,10 +154,8 @@ def get_clean_background_video(target_duration):
         ], check=True)
         return temp_bg
 
-    # --- 2. FALLBACK SI ASSETS ESTIGUÉS BUIT: REDDIT O RESERVA ---
     for f in ["background.mp4", "Background.mp4"]:
         if os.path.exists(f):
-            print(f"📁 Fent servir vídeo de reserva: {f}")
             subprocess.run([
                 "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
                 "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
@@ -136,7 +166,6 @@ def get_clean_background_video(target_duration):
     return None
 
 async def generate_speech_with_word_timestamps(text, audio_path):
-    """Genera àudio amb Edge-TTS i extreu els timestamps exactes de cada paraula."""
     communicate = edge_tts.Communicate(
         text,
         VOICE,
@@ -155,7 +184,6 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                 dur_sec = chunk["duration"] / 10_000_000
                 raw_token = chunk["text"].strip()
                 
-                # Desglossar expressions compostes (ex: 22-year-old -> 22, year, old)
                 if "-" in raw_token and len(raw_token) > 5:
                     parts = [p for p in raw_token.split("-") if p]
                     if parts:
@@ -196,9 +224,10 @@ async def generate_speech_with_word_timestamps(text, audio_path):
     return total_dur, words
 
 def build_card_html(post):
-    """Construeix la targeta quadrada (1:1) translúcida."""
-    story_text = post.get("story", "")
-    preview_words = story_text.split()[:22]
+    clean_story = strip_sfx_tags(post.get("story", ""))
+    clean_title = strip_sfx_tags(post.get("title", ""))
+
+    preview_words = clean_story.split()[:22]
     story_preview = " ".join(preview_words) + "..."
 
     upvotes = f"{random.uniform(30.0, 160.0):.1f}k"
@@ -330,7 +359,7 @@ def build_card_html(post):
       </div>
     </div>
 
-    <div class="title">{post['title']}</div>
+    <div class="title">{clean_title}</div>
     <div class="body-text">{story_preview}</div>
 
     <div class="pills-container">
@@ -379,8 +408,6 @@ def build_card_html(post):
 </html>"""
 
 async def render_html_to_card_png(post, output_image_path):
-    """Renderitza la targeta quadrada (1:1) translúcida amb Playwright."""
-    print("🎨 Renderitzant la targeta quadrada translúcida (1:1)...")
     html_content = build_card_html(post)
     html_file = os.path.abspath("temp/card.html")
     with open(html_file, "w", encoding="utf-8") as f:
@@ -395,7 +422,6 @@ async def render_html_to_card_png(post, output_image_path):
         await browser.close()
 
 def format_ass_time(seconds):
-    """Format de temps per a subtítols ASS: H:MM:SS.cs"""
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -405,7 +431,6 @@ def format_ass_time(seconds):
     return f"{hrs}:{mins:02d}:{secs:02d}.{centis:02d}"
 
 def generate_popin_word_subtitles(words_list, output_path="temp/captions.ass"):
-    """Subtítols TikTok d'1 sola paraula amb efecte Pop-In."""
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -447,25 +472,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(dialogues) + "\n")
 
+def get_sfx_timestamp(word_idx, words_list, fallback_time):
+    if not words_list:
+        return fallback_time
+    if word_idx <= 0:
+        return words_list[0]["start"]
+    if word_idx < len(words_list):
+        return words_list[word_idx]["start"]
+    return words_list[-1]["end"]
+
 async def main():
     os.makedirs("temp", exist_ok=True)
+    os.makedirs("assets/audio", exist_ok=True)
     
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Veu del títol
-    print("🗣️ Generant àudio del Títol...")
+    # 1. Parsejar text i sfx del títol
+    title_clean, title_sfx_markers = parse_text_and_sfx(story_data["title"])
     title_audio = os.path.abspath("temp/title.mp3")
-    title_dur, _ = await generate_speech_with_word_timestamps(story_data["title"], title_audio)
+    title_dur, title_words = await generate_speech_with_word_timestamps(title_clean, title_audio)
 
-    # 2. Targeta inicial
+    # 2. Renderitzar targeta visual
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 3. Veu de la història
-    print("🗣️ Generant àudio de la Història...")
+    # 3. Parsejar text i sfx de la història
+    story_clean, story_sfx_markers = parse_text_and_sfx(story_data["story"])
     story_audio = os.path.abspath("temp/story.mp3")
-    story_dur, story_words = await generate_speech_with_word_timestamps(story_data["story"], story_audio)
+    story_dur, story_words = await generate_speech_with_word_timestamps(story_clean, story_audio)
     
     adjusted_words = []
     for w in story_words:
@@ -478,23 +513,37 @@ async def main():
     total_video_duration = title_dur + story_dur
     print(f"\n⏱️ Durada total del vídeo: {total_video_duration:.1f}s")
 
-    # 4. Concatenar àudios
+    # 4. Calcular timestamps exactes dels SFX
+    all_sfx_events = []
+    for word_idx, sfx_name in title_sfx_markers:
+        t = get_sfx_timestamp(word_idx, title_words, 0.0)
+        all_sfx_events.append((t, sfx_name))
+        
+    for word_idx, sfx_name in story_sfx_markers:
+        t = get_sfx_timestamp(word_idx, story_words, 0.0)
+        all_sfx_events.append((title_dur + t, sfx_name))
+
+    # 5. Concatenar àudios i barrejar els SFX
+    raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
+    mixed_full_audio = os.path.abspath("temp/full_audio.mp3")
     list_path = os.path.abspath("temp/audio_list.txt")
-    full_audio = os.path.abspath("temp/full_audio.mp3")
+    
     with open(list_path, "w") as f:
         f.write(f"file '{title_audio}'\n")
         f.write(f"file '{story_audio}'\n")
             
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", full_audio], check=True)
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", raw_full_audio], check=True)
+    
+    mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
 
-    # 5. Fitxer de subtítols
+    # 6. Fitxer de subtítols
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 6. Fons de vídeo (Agafa automàticament vídeos d'assets/ amb qualsevol títol)
+    # 7. Fons de vídeo
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 7. MUNTATGE FINAL: Targeta animada amb Pop In i Fade Out (amb -framerate 30 -loop 1)
+    # 8. Muntatge final FFmpeg
     print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.35)
@@ -516,7 +565,7 @@ async def main():
         "-loop", "1",
         "-t", str(title_dur),
         "-i", title_card,
-        "-i", full_audio,
+        "-i", mixed_full_audio,
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "2:a",

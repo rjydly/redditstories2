@@ -10,14 +10,23 @@ import edge_tts
 from playwright.async_api import async_playwright
 from pydub import AudioSegment
 
-VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+# CONFIGURACIÓ DE VEU (Pots canviar-la per en-US-GuyNeural, en-US-AvaNeural, etc.)
+VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
 VOICE_RATE = os.getenv("TTS_RATE", "+35%")
-VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
+VOICE_PITCH = os.getenv("TTS_PITCH", "+0Hz")  # Per a veu masculina, 0Hz o +2Hz sona contundent i natural
 
 def strip_sfx_tags(text):
     """Elimina les etiquetes [sfx:nom] per al text visual de la targeta."""
     cleaned = re.sub(r'\[sfx:\s*[\w\-]+\]', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+([.,!?;:])', r'\1', cleaned)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+def sanitize_for_continuous_speech(text):
+    """
+    Elimina punts, comes i signes de puntuació que forcen pauses llargues a Edge-TTS,
+    mantenint un flux continu i urgent sense silencis entre frases.
+    """
+    cleaned = re.sub(r'[.,;:!?"\'—–-]', ' ', text)
     return re.sub(r'\s+', ' ', cleaned).strip()
 
 def parse_text_and_sfx(text):
@@ -71,7 +80,7 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
             continue
 
         sfx_audio = AudioSegment.from_file(sfx_path)
-        sfx_audio = sfx_audio - 2  # Atenuació de -2 dB per no tapar la veu
+        sfx_audio = sfx_audio - 2
         pos_ms = max(0, int(timestamp_sec * 1000))
         base = base.overlay(sfx_audio, position=pos_ms)
         folder_found = os.path.basename(os.path.dirname(sfx_path))
@@ -150,7 +159,6 @@ def get_clean_background_video(target_duration):
         with open(used_file, "a", encoding="utf-8") as f:
             f.write(chosen_name + "\n")
 
-        # Codificació d'alta definició amb CRF 18
         subprocess.run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
             "-i", os.path.abspath(chosen),
@@ -496,30 +504,32 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Parsejar text i sfx del títol
+    # 1. Parsejar text i sfx de títol i història
     title_clean, title_sfx_markers = parse_text_and_sfx(story_data["title"])
-    title_audio = os.path.abspath("temp/title.mp3")
-    title_dur, title_words = await generate_speech_with_word_timestamps(title_clean, title_audio)
+    story_clean, story_sfx_markers = parse_text_and_sfx(story_data["story"])
 
-    # 2. Renderitzar targeta visual
+    # Renderitzar targeta visual de Reddit (amb text elegant i puntuació correcta)
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 3. Parsejar text i sfx de la història
-    story_clean, story_sfx_markers = parse_text_and_sfx(story_data["story"])
-    story_audio = os.path.abspath("temp/story.mp3")
-    story_dur, story_words = await generate_speech_with_word_timestamps(story_clean, story_audio)
-    
-    adjusted_words = []
-    for w in story_words:
-        adjusted_words.append({
-            "word": w["word"],
-            "start": w["start"] + title_dur,
-            "end": w["end"] + title_dur
-        })
+    # 2. Text optimitzat per a Edge-TTS (sense pauses de puntuació mortes)
+    title_tts = sanitize_for_continuous_speech(title_clean)
+    story_tts = sanitize_for_continuous_speech(story_clean)
 
-    total_video_duration = title_dur + story_dur
-    print(f"\n⏱️ Durada total del vídeo: {total_video_duration:.1f}s")
+    # Recompte de paraules per dividir exactament els timestamps
+    title_word_count = len(title_tts.split())
+    combined_tts = f"{title_tts} {story_tts}"
+
+    # 3. Generar una sola pista d'àudio contínua (zero pauses i transició instantània)
+    raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
+    total_video_duration, all_words = await generate_speech_with_word_timestamps(combined_tts, raw_full_audio)
+
+    title_words = all_words[:title_word_count]
+    story_words = all_words[title_word_count:]
+
+    # Durada exacta del títol en la línia de temps
+    title_dur = title_words[-1]["end"] if title_words else 2.5
+    print(f"\n⏱️ Durada del títol: {title_dur:.2f}s | Durada total: {total_video_duration:.1f}s")
 
     # 4. Calcular timestamps exactes dels SFX
     all_sfx_events = []
@@ -528,40 +538,31 @@ async def main():
         all_sfx_events.append((t, sfx_name))
         
     for word_idx, sfx_name in story_sfx_markers:
-        t = get_sfx_timestamp(word_idx, story_words, 0.0)
-        all_sfx_events.append((title_dur + t, sfx_name))
+        t = get_sfx_timestamp(word_idx, story_words, title_dur)
+        all_sfx_events.append((t, sfx_name))
 
-    # 5. Concatenar àudios i barrejar els SFX
-    raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
+    # 5. Barrejar els efectes de so sobre l'àudio contínu
     mixed_full_audio = os.path.abspath("temp/full_audio.mp3")
-    list_path = os.path.abspath("temp/audio_list.txt")
-    
-    with open(list_path, "w") as f:
-        f.write(f"file '{title_audio}'\n")
-        f.write(f"file '{story_audio}'\n")
-            
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", raw_full_audio], check=True)
-    
     mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
 
-    # 6. Fitxer de subtítols
+    # 6. Fitxer de subtítols (només de la història, apareixen un cop marxa la targeta)
     ass_path = os.path.abspath("temp/captions.ass")
-    generate_popin_word_subtitles(adjusted_words, ass_path)
+    generate_popin_word_subtitles(story_words, ass_path)
 
     # 7. Fons de vídeo en alta definició (CRF 18)
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 8. Muntatge final FFmpeg en alta fidelitat (CRF 19 - Preset fast)
-    print("🎞️ Renderitzant vídeo final en alta definició...")
+    # 8. Muntatge final FFmpeg (CRF 19 - Preset fast)
+    print("🎞️ Renderitzant vídeo final sense pauses...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
-    fade_out_start = max(0.0, title_dur - 0.35)
+    fade_out_start = max(0.0, title_dur - 0.25)
 
     filter_complex = (
         f"[0:v]null[v0];"
         f"[1:v]format=yuva420p,"
         f"scale=w='trunc((880 * if(lt(t,0.15), 0.75 + 0.30*(t/0.15), if(lt(t,0.25), 1.05 - 0.05*((t-0.15)/0.10), 1.0)))/2)*2':h=-2:eval=frame,"
         f"fade=t=in:st=0:d=0.15:alpha=1,"
-        f"fade=t=out:st={fade_out_start:.2f}:d=0.35:alpha=1[card];"
+        f"fade=t=out:st={fade_out_start:.2f}:d=0.25:alpha=1[card];"
         f"[v0][card]overlay=(W-w)/2:(H-h)/2:enable='between(t,0,{title_dur:.2f})'[v1];"
         f"[v1]subtitles='{escaped_ass}'[v]"
     )

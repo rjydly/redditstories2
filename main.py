@@ -46,7 +46,6 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
         shutil.copy(base_audio_path, output_path)
         return output_path
 
-    # Comprova tant la carpeta audios/ com assets/audios/ o assets/audio/
     possible_dirs = [
         os.path.abspath("audios"),
         os.path.abspath("assets/audios"),
@@ -72,7 +71,7 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
             continue
 
         sfx_audio = AudioSegment.from_file(sfx_path)
-        sfx_audio = sfx_audio - 2  # Atenuació de -2 dB per no trepitjar la veu
+        sfx_audio = sfx_audio - 2  # Atenuació de -2 dB per no tapar la veu
         pos_ms = max(0, int(timestamp_sec * 1000))
         base = base.overlay(sfx_audio, position=pos_ms)
         folder_found = os.path.basename(os.path.dirname(sfx_path))
@@ -151,12 +150,13 @@ def get_clean_background_video(target_duration):
         with open(used_file, "a", encoding="utf-8") as f:
             f.write(chosen_name + "\n")
 
+        # Codificació d'alta definició amb CRF 18
         subprocess.run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
             "-i", os.path.abspath(chosen),
             "-t", str(int(target_duration) + 2),
             "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-            "-c:v", "libx264", "-preset", "ultrafast", "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an",
             temp_bg
         ], check=True)
         return temp_bg
@@ -166,7 +166,7 @@ def get_clean_background_video(target_duration):
             subprocess.run([
                 "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
                 "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
-                "-c:v", "libx264", "-preset", "ultrafast", "-an", temp_bg
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", temp_bg
             ], check=True)
             return temp_bg
 
@@ -548,11 +548,11 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 7. Fons de vídeo
+    # 7. Fons de vídeo en alta definició (CRF 18)
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 8. Muntatge final FFmpeg
-    print("🎞️ Renderitzant vídeo final...")
+    # 8. Muntatge final FFmpeg en alta fidelitat (CRF 19 - Preset fast)
+    print("🎞️ Renderitzant vídeo final en alta definició...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.35)
 
@@ -578,7 +578,8 @@ async def main():
         "-map", "[v]",
         "-map", "2:a",
         "-c:v", "libx264",
-        "-preset", "veryfast",
+        "-preset", "fast",
+        "-crf", "19",
         "-threads", "0",
         "-c:a", "aac",
         "-t", str(total_video_duration),

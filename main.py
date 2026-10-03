@@ -10,29 +10,24 @@ import edge_tts
 from playwright.async_api import async_playwright
 from pydub import AudioSegment
 
-# CONFIGURACIÓ DE VEU (Pots canviar-la per en-US-GuyNeural, en-US-AvaNeural, etc.)
-VOICE = os.getenv("TTS_VOICE", "en-US-ChristopherNeural")
+# CONFIGURACIÓ DE VEU: EmmaNeural (veu jove femenina)
+VOICE = os.getenv("TTS_VOICE", "en-US-EmmaNeural")
 VOICE_RATE = os.getenv("TTS_RATE", "+35%")
-VOICE_PITCH = os.getenv("TTS_PITCH", "+0Hz")  # Per a veu masculina, 0Hz o +2Hz sona contundent i natural
+VOICE_PITCH = os.getenv("TTS_PITCH", "+0Hz")
+
+# Pausa màxima permesa després d'un punt (0.22s = ritme ràpid sense buits)
+MAX_PAUSE_BETWEEN_SENTENCES = 0.22
 
 def strip_sfx_tags(text):
-    """Elimina les etiquetes [sfx:nom] per al text visual de la targeta."""
+    """Elimina les etiquetes [sfx:nom] per al text visual de la targeta i Edge-TTS."""
     cleaned = re.sub(r'\[sfx:\s*[\w\-]+\]', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+([.,!?;:])', r'\1', cleaned)
     return re.sub(r'\s+', ' ', cleaned).strip()
 
-def sanitize_for_continuous_speech(text):
-    """
-    Elimina punts, comes i signes de puntuació que forcen pauses llargues a Edge-TTS,
-    mantenint un flux continu i urgent sense silencis entre frases.
-    """
-    cleaned = re.sub(r'[.,;:!?"\'—–-]', ' ', text)
-    return re.sub(r'\s+', ' ', cleaned).strip()
-
 def parse_text_and_sfx(text):
     """
-    Extreu el text net per a la veu i calcula l'índex de paraula exacte
-    on s'ha de disparar cada efecte de so.
+    Extreu el text net mantenint tota la puntuació original
+    i calcula la posició de cada efecte de so.
     """
     sfx_pattern = re.compile(r'\[sfx:\s*([\w\-]+)\]', re.IGNORECASE)
     sfx_markers = []
@@ -48,6 +43,98 @@ def parse_text_and_sfx(text):
     clean_text = re.sub(r'\s+([.,!?;:])', r'\1', clean_text)
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text, sfx_markers
+
+def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PAUSE_BETWEEN_SENTENCES):
+    """
+    Conserva la puntuació i entonació humana, però retalla els silencis
+    morts entre frases perquè comencin ràpidament sense pauses llargues.
+    Reajusta automàticament els timestamps dels subtítols.
+    """
+    if not words or not os.path.exists(audio_path):
+        return 0.0, words
+
+    audio = AudioSegment.from_file(audio_path)
+    
+    # 1. Retallar silenci inicial abans de la primera paraula
+    first_start = words[0]["start"]
+    initial_trim_sec = 0.0
+    if first_start > 0.08:
+        initial_trim_sec = first_start - 0.04
+        initial_trim_ms = int(initial_trim_sec * 1000)
+        audio = audio[initial_trim_ms:]
+    
+    current_words = []
+    for w in words:
+        current_words.append({
+            "word": w["word"],
+            "start": max(0.0, w["start"] - initial_trim_sec),
+            "end": max(0.0, w["end"] - initial_trim_sec)
+        })
+
+    # 2. Detectar pauses excessives entre frases
+    cuts = []
+    for i in range(len(current_words) - 1):
+        w_end = current_words[i]["end"]
+        next_start = current_words[i+1]["start"]
+        gap = next_start - w_end
+        if gap > max_pause_sec:
+            cut_start = w_end + max_pause_sec
+            cut_end = next_start
+            cuts.append((cut_start, cut_end))
+
+    # Si no hi ha pauses llargues, només retallem la cua final
+    if not cuts:
+        last_end = current_words[-1]["end"]
+        final_keep_ms = min(len(audio), int((last_end + 0.12) * 1000))
+        audio = audio[:final_keep_ms]
+        audio.export(output_path, format="mp3")
+        return len(audio) / 1000.0, current_words
+
+    # 3. Eliminar els talls de silenci de la pista d'àudio i sincronitzar paraules
+    new_audio = AudioSegment.empty()
+    last_pos_ms = 0
+    time_removed = 0.0
+    final_words = []
+    word_idx = 0
+
+    for cut_start, cut_end in cuts:
+        cut_start_ms = int(cut_start * 1000)
+        cut_end_ms = int(cut_end * 1000)
+        cut_dur = cut_end - cut_start
+
+        new_audio += audio[last_pos_ms:cut_start_ms]
+        last_pos_ms = cut_end_ms
+
+        while word_idx < len(current_words) and current_words[word_idx]["start"] < cut_start:
+            cw = current_words[word_idx]
+            final_words.append({
+                "word": cw["word"],
+                "start": max(0.0, cw["start"] - time_removed),
+                "end": max(0.0, cw["end"] - time_removed)
+            })
+            word_idx += 1
+
+        time_removed += cut_dur
+
+    new_audio += audio[last_pos_ms:]
+
+    while word_idx < len(current_words):
+        cw = current_words[word_idx]
+        final_words.append({
+            "word": cw["word"],
+            "start": max(0.0, cw["start"] - time_removed),
+            "end": max(0.0, cw["end"] - time_removed)
+        })
+        word_idx += 1
+
+    if final_words:
+        last_end = final_words[-1]["end"]
+        final_keep_ms = min(len(new_audio), int((last_end + 0.12) * 1000))
+        new_audio = new_audio[:final_keep_ms]
+
+    new_audio.export(output_path, format="mp3")
+    total_dur = len(new_audio) / 1000.0
+    return total_dur, final_words
 
 def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
     """Barreja els efectes de so sobre la veu contínua sense interrompre-la."""
@@ -504,31 +591,40 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Parsejar text i sfx de títol i història
+    # 1. Parsejar text i sfx de títol i història (mantenint tota la puntuació)
     title_clean, title_sfx_markers = parse_text_and_sfx(story_data["title"])
     story_clean, story_sfx_markers = parse_text_and_sfx(story_data["story"])
 
-    # Renderitzar targeta visual de Reddit (amb text elegant i puntuació correcta)
+    # Renderitzar targeta visual de Reddit
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Text optimitzat per a Edge-TTS (sense pauses de puntuació mortes)
-    title_tts = sanitize_for_continuous_speech(title_clean)
-    story_tts = sanitize_for_continuous_speech(story_clean)
+    # 2. Generar àudio del Títol amb entonació natural i retallar silencis
+    print("🗣️ Generant àudio del Títol amb EmmaNeural...")
+    raw_title_audio = os.path.abspath("temp/raw_title.mp3")
+    title_dur_raw, title_words_raw = await generate_speech_with_word_timestamps(title_clean, raw_title_audio)
+    
+    title_audio = os.path.abspath("temp/title.mp3")
+    title_dur, title_words = trim_and_compress_audio(raw_title_audio, title_words_raw, title_audio)
 
-    # Recompte de paraules per dividir exactament els timestamps
-    title_word_count = len(title_tts.split())
-    combined_tts = f"{title_tts} {story_tts}"
+    # 3. Generar àudio de la Història amb entonació natural i comprimir pauses entre frases
+    print("🗣️ Generant àudio de la Història amb EmmaNeural...")
+    raw_story_audio = os.path.abspath("temp/raw_story.mp3")
+    story_dur_raw, story_words_raw = await generate_speech_with_word_timestamps(story_clean, raw_story_audio)
 
-    # 3. Generar una sola pista d'àudio contínua (zero pauses i transició instantània)
-    raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
-    total_video_duration, all_words = await generate_speech_with_word_timestamps(combined_tts, raw_full_audio)
+    story_audio = os.path.abspath("temp/story.mp3")
+    story_dur, story_words = trim_and_compress_audio(raw_story_audio, story_words_raw, story_audio)
 
-    title_words = all_words[:title_word_count]
-    story_words = all_words[title_word_count:]
+    # Ajustar paraules de la història a la línia de temps global
+    adjusted_words = []
+    for w in story_words:
+        adjusted_words.append({
+            "word": w["word"],
+            "start": w["start"] + title_dur,
+            "end": w["end"] + title_dur
+        })
 
-    # Durada exacta del títol en la línia de temps
-    title_dur = title_words[-1]["end"] if title_words else 2.5
+    total_video_duration = title_dur + story_dur
     print(f"\n⏱️ Durada del títol: {title_dur:.2f}s | Durada total: {total_video_duration:.1f}s")
 
     # 4. Calcular timestamps exactes dels SFX
@@ -538,22 +634,30 @@ async def main():
         all_sfx_events.append((t, sfx_name))
         
     for word_idx, sfx_name in story_sfx_markers:
-        t = get_sfx_timestamp(word_idx, story_words, title_dur)
-        all_sfx_events.append((t, sfx_name))
+        t = get_sfx_timestamp(word_idx, story_words, 0.0)
+        all_sfx_events.append((title_dur + t, sfx_name))
 
-    # 5. Barrejar els efectes de so sobre l'àudio contínu
+    # 5. Concatenar àudios i barrejar efectes de so
+    raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
     mixed_full_audio = os.path.abspath("temp/full_audio.mp3")
+    list_path = os.path.abspath("temp/audio_list.txt")
+    
+    with open(list_path, "w") as f:
+        f.write(f"file '{title_audio}'\n")
+        f.write(f"file '{story_audio}'\n")
+            
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", raw_full_audio], check=True)
     mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
 
-    # 6. Fitxer de subtítols (només de la història, apareixen un cop marxa la targeta)
+    # 6. Fitxer de subtítols
     ass_path = os.path.abspath("temp/captions.ass")
-    generate_popin_word_subtitles(story_words, ass_path)
+    generate_popin_word_subtitles(adjusted_words, ass_path)
 
     # 7. Fons de vídeo en alta definició (CRF 18)
     temp_bg = get_clean_background_video(total_video_duration)
 
     # 8. Muntatge final FFmpeg (CRF 19 - Preset fast)
-    print("🎞️ Renderitzant vídeo final sense pauses...")
+    print("🎞️ Renderitzant vídeo final...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.25)
 

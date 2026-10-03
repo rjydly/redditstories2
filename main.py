@@ -10,10 +10,10 @@ import edge_tts
 from playwright.async_api import async_playwright
 from pydub import AudioSegment
 
-# CONFIGURACIÓ DE VEU: EmmaNeural (veu jove femenina)
-VOICE = os.getenv("TTS_VOICE", "en-US-EmmaNeural")
+# CONFIGURACIÓ DE VEU: JennyNeural (+35%, +12Hz)
+VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
 VOICE_RATE = os.getenv("TTS_RATE", "+35%")
-VOICE_PITCH = os.getenv("TTS_PITCH", "+0Hz")
+VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
 
 # Pausa màxima permesa després d'un punt (0.22s = ritme ràpid sense buits)
 MAX_PAUSE_BETWEEN_SENTENCES = 0.22
@@ -163,7 +163,9 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
                 break
                 
         if not sfx_path:
-            print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a audios/ ni a assets/audios/")
+            # Si pop.mp3 encara no s'ha pujat, s'ignora en silenci
+            if sfx_name != "pop":
+                print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a audios/ ni a assets/audios/")
             continue
 
         sfx_audio = AudioSegment.from_file(sfx_path)
@@ -591,7 +593,7 @@ async def main():
     story_data = get_story_from_csv("stories.csv")
     print(f"\n📖 Story #{story_data.get('id', '1')}: {story_data['title']}")
 
-    # 1. Parsejar text i sfx de títol i història (mantenint tota la puntuació)
+    # 1. Parsejar text i sfx de títol i història
     title_clean, title_sfx_markers = parse_text_and_sfx(story_data["title"])
     story_clean, story_sfx_markers = parse_text_and_sfx(story_data["story"])
 
@@ -599,16 +601,16 @@ async def main():
     title_card = os.path.abspath("temp/title_card.png")
     await render_html_to_card_png(story_data, title_card)
 
-    # 2. Generar àudio del Títol amb entonació natural i retallar silencis
-    print("🗣️ Generant àudio del Títol amb EmmaNeural...")
+    # 2. Generar àudio del Títol amb JennyNeural
+    print("🗣️ Generant àudio del Títol amb JennyNeural...")
     raw_title_audio = os.path.abspath("temp/raw_title.mp3")
     title_dur_raw, title_words_raw = await generate_speech_with_word_timestamps(title_clean, raw_title_audio)
     
     title_audio = os.path.abspath("temp/title.mp3")
     title_dur, title_words = trim_and_compress_audio(raw_title_audio, title_words_raw, title_audio)
 
-    # 3. Generar àudio de la Història amb entonació natural i comprimir pauses entre frases
-    print("🗣️ Generant àudio de la Història amb EmmaNeural...")
+    # 3. Generar àudio de la Història amb JennyNeural
+    print("🗣️ Generant àudio de la Història amb JennyNeural...")
     raw_story_audio = os.path.abspath("temp/raw_story.mp3")
     story_dur_raw, story_words_raw = await generate_speech_with_word_timestamps(story_clean, raw_story_audio)
 
@@ -629,6 +631,10 @@ async def main():
 
     # 4. Calcular timestamps exactes dels SFX
     all_sfx_events = []
+    
+    # 💥 SO D'INICI AUTOMÀTIC: Pop sincronitzat amb l'animació de la targeta al segon 0.0s
+    all_sfx_events.append((0.0, "pop"))
+
     for word_idx, sfx_name in title_sfx_markers:
         t = get_sfx_timestamp(word_idx, title_words, 0.0)
         all_sfx_events.append((t, sfx_name))

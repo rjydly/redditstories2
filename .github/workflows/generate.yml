@@ -32,6 +32,16 @@ jobs:
       - name: Instal·lar Chromium per a Playwright
         run: playwright install --with-deps chromium
 
+      - name: Baixar vídeos de fons de les Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          for tag in $(gh release list --limit 50 --json tagName -q '.[].tagName' | grep -E '^background_videos' || true); do
+            echo "⬇️ Descarregant fons de la release: $tag"
+            gh release download "$tag" -p "*.mp4" -D assets/ --clobber || true
+          done
+
       - name: Generar Vídeo
         run: python main.py
 

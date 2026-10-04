@@ -48,14 +48,12 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
     """
     Conserva la puntuació i entonació humana, però retalla els silencis
     morts entre frases perquè comencin ràpidament sense pauses llargues.
-    Reajusta automàticament els timestamps dels subtítols.
     """
     if not words or not os.path.exists(audio_path):
         return 0.0, words
 
     audio = AudioSegment.from_file(audio_path)
     
-    # 1. Retallar silenci inicial abans de la primera paraula
     first_start = words[0]["start"]
     initial_trim_sec = 0.0
     if first_start > 0.08:
@@ -71,7 +69,6 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
             "end": max(0.0, w["end"] - initial_trim_sec)
         })
 
-    # 2. Detectar pauses excessives entre frases
     cuts = []
     for i in range(len(current_words) - 1):
         w_end = current_words[i]["end"]
@@ -82,7 +79,6 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
             cut_end = next_start
             cuts.append((cut_start, cut_end))
 
-    # Si no hi ha pauses llargues, només retallem la cua final
     if not cuts:
         last_end = current_words[-1]["end"]
         final_keep_ms = min(len(audio), int((last_end + 0.12) * 1000))
@@ -90,7 +86,6 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
         audio.export(output_path, format="mp3")
         return len(audio) / 1000.0, current_words
 
-    # 3. Eliminar els talls de silenci de la pista d'àudio i sincronitzar paraules
     new_audio = AudioSegment.empty()
     last_pos_ms = 0
     time_removed = 0.0
@@ -137,11 +132,10 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
     return total_dur, final_words
 
 def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
-    """Barreja els efectes de so sobre la veu contínua sense interrompre-la."""
-    if not sfx_events:
-        shutil.copy(base_audio_path, output_path)
-        return output_path
-
+    """
+    Barreja els efectes de so sobre la veu.
+    Si un so és al final (com el FAAAH), estén la pista perquè NO es talli mai.
+    """
     possible_dirs = [
         os.path.abspath("audios"),
         os.path.abspath("assets/audios"),
@@ -149,6 +143,10 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
         os.path.abspath("audio")
     ]
     base = AudioSegment.from_file(base_audio_path)
+
+    if not sfx_events:
+        shutil.copy(base_audio_path, output_path)
+        return output_path, len(base) / 1000.0
 
     for timestamp_sec, sfx_name in sfx_events:
         sfx_path = None
@@ -163,7 +161,6 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
                 break
                 
         if not sfx_path:
-            # Si pop.mp3 encara no s'ha pujat, s'ignora en silenci
             if sfx_name != "pop":
                 print(f"⚠️ Alerta: Efecte de so '{sfx_name}' no trobat a audios/ ni a assets/audios/")
             continue
@@ -171,12 +168,20 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
         sfx_audio = AudioSegment.from_file(sfx_path)
         sfx_audio = sfx_audio - 2
         pos_ms = max(0, int(timestamp_sec * 1000))
+        
+        # SI EL SO SUPERA LA DURADA DE LA VEU (ex: FAAAH al final), ESTENEM LA PISTA
+        required_duration_ms = pos_ms + len(sfx_audio) + 150
+        if required_duration_ms > len(base):
+            silence_padding = AudioSegment.silent(duration=required_duration_ms - len(base))
+            base = base + silence_padding
+
         base = base.overlay(sfx_audio, position=pos_ms)
         folder_found = os.path.basename(os.path.dirname(sfx_path))
         print(f"🔊 SFX afegit: '{sfx_name}' al segon {timestamp_sec:.2f}s (des de {folder_found}/)")
 
     base.export(output_path, format="mp3")
-    return output_path
+    final_duration_sec = len(base) / 1000.0
+    return output_path, final_duration_sec
 
 def get_story_from_csv(csv_path="stories.csv"):
     if not os.path.exists(csv_path):
@@ -626,13 +631,10 @@ async def main():
             "end": w["end"] + title_dur
         })
 
-    total_video_duration = title_dur + story_dur
-    print(f"\n⏱️ Durada del títol: {title_dur:.2f}s | Durada total: {total_video_duration:.1f}s")
-
     # 4. Calcular timestamps exactes dels SFX
     all_sfx_events = []
     
-    # 💥 SO D'INICI AUTOMÀTIC: Pop sincronitzat amb l'animació de la targeta al segon 0.0s
+    # 💥 Pop automàtic sincronitzat amb la targeta d'inici (segon 0.0s)
     all_sfx_events.append((0.0, "pop"))
 
     for word_idx, sfx_name in title_sfx_markers:
@@ -643,7 +645,7 @@ async def main():
         t = get_sfx_timestamp(word_idx, story_words, 0.0)
         all_sfx_events.append((title_dur + t, sfx_name))
 
-    # 5. Concatenar àudios i barrejar efectes de so
+    # 5. Concatenar àudios i barrejar efectes de so (amb extensió si el FAAAH sobrepassa la veu)
     raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
     mixed_full_audio = os.path.abspath("temp/full_audio.mp3")
     list_path = os.path.abspath("temp/audio_list.txt")
@@ -653,7 +655,10 @@ async def main():
         f.write(f"file '{story_audio}'\n")
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", raw_full_audio], check=True)
-    mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
+    
+    # mix_sfx_into_audio ens retorna la durada real final (tenint en compte el FAAAH)
+    mixed_full_audio, total_video_duration = mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
+    print(f"\n⏱️ Durada final del vídeo (amb SFX complets): {total_video_duration:.1f}s")
 
     # 6. Fitxer de subtítols
     ass_path = os.path.abspath("temp/captions.ass")

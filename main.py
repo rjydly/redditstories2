@@ -169,7 +169,6 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
         sfx_audio = sfx_audio - 2
         pos_ms = max(0, int(timestamp_sec * 1000))
         
-        # SI EL SO SUPERA LA DURADA DE LA VEU (ex: FAAAH al final), ESTENEM LA PISTA
         required_duration_ms = pos_ms + len(sfx_audio) + 150
         if required_duration_ms > len(base):
             silence_padding = AudioSegment.silent(duration=required_duration_ms - len(base))
@@ -253,12 +252,13 @@ def get_clean_background_video(target_duration):
         with open(used_file, "a", encoding="utf-8") as f:
             f.write(chosen_name + "\n")
 
+        # Pas intermedi pràcticament lossless (CRF 14) per no degradar la font de 25 Mbps
         subprocess.run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
             "-i", os.path.abspath(chosen),
             "-t", str(int(target_duration) + 2),
             "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "14", "-an",
             temp_bg
         ], check=True)
         return temp_bg
@@ -268,7 +268,8 @@ def get_clean_background_video(target_duration):
             subprocess.run([
                 "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
                 "-i", os.path.abspath(f), "-t", str(int(target_duration) + 2),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", temp_bg
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "14", "-an", temp_bg
             ], check=True)
             return temp_bg
 
@@ -645,7 +646,7 @@ async def main():
         t = get_sfx_timestamp(word_idx, story_words, 0.0)
         all_sfx_events.append((title_dur + t, sfx_name))
 
-    # 5. Concatenar àudios i barrejar efectes de so (amb extensió si el FAAAH sobrepassa la veu)
+    # 5. Concatenar àudios i barrejar efectes de so
     raw_full_audio = os.path.abspath("temp/raw_full_audio.mp3")
     mixed_full_audio = os.path.abspath("temp/full_audio.mp3")
     list_path = os.path.abspath("temp/audio_list.txt")
@@ -656,7 +657,6 @@ async def main():
             
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", raw_full_audio], check=True)
     
-    # mix_sfx_into_audio ens retorna la durada real final (tenint en compte el FAAAH)
     mixed_full_audio, total_video_duration = mix_sfx_into_audio(raw_full_audio, all_sfx_events, mixed_full_audio)
     print(f"\n⏱️ Durada final del vídeo (amb SFX complets): {total_video_duration:.1f}s")
 
@@ -664,11 +664,11 @@ async def main():
     ass_path = os.path.abspath("temp/captions.ass")
     generate_popin_word_subtitles(adjusted_words, ass_path)
 
-    # 7. Fons de vídeo en alta definició (CRF 18)
+    # 7. Fons de vídeo
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 8. Muntatge final FFmpeg (CRF 19 - Preset fast)
-    print("🎞️ Renderitzant vídeo final...")
+    # 8. Muntatge final FFmpeg 100% optimitzat per a la Graph API d'Instagram (Reels)
+    print("🎞️ Renderitzant vídeo final amb especificacions d'Instagram API...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.25)
 
@@ -693,11 +693,31 @@ async def main():
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "2:a",
+        # CÒDEC I PERFIL EXIGIT PER META (H.264 High Profile Level 4.2)
         "-c:v", "libx264",
         "-preset", "fast",
-        "-crf", "19",
-        "-threads", "0",
+        "-profile:v", "high",
+        "-level:v", "4.2",
+        # CONTROL DE BITRATE I QUALITAT (Límit de seguretat a 25 Mbps)
+        "-crf", "17",
+        "-maxrate", "25M",
+        "-bufsize", "25M",
+        # FLUIDESA: TAXA DE FOTOGRAMES CONSTANT (CFR) I CLOSED GOP A 1s
+        "-g", "30",
+        "-keyint_min", "30",
+        "-sc_threshold", "0",
+        "-fps_mode", "cfr",
+        # METADADES I COLOR REC.709
+        "-movflags", "+faststart",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
+        # ÀUDIO OFICIAL INSTAGRAM (AAC-LC 48kHz Stereo 192k)
         "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "48000",
+        "-ac", "2",
+        "-threads", "0",
         "-t", str(total_video_duration),
         "-pix_fmt", "yuv420p",
         "final_video.mp4"

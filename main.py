@@ -6,6 +6,7 @@ import random
 import shutil
 import asyncio
 import subprocess
+import requests
 import edge_tts
 from playwright.async_api import async_playwright
 from pydub import AudioSegment
@@ -18,11 +19,13 @@ VOICE_PITCH = os.getenv("TTS_PITCH", "+12Hz")
 # Pausa màxima permesa després d'un punt (0.22s = ritme ràpid sense buits)
 MAX_PAUSE_BETWEEN_SENTENCES = 0.22
 
+
 def strip_sfx_tags(text):
     """Elimina les etiquetes [sfx:nom] per al text visual de la targeta i Edge-TTS."""
     cleaned = re.sub(r'\[sfx:\s*[\w\-]+\]', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+([.,!?;:])', r'\1', cleaned)
     return re.sub(r'\s+', ' ', cleaned).strip()
+
 
 def parse_text_and_sfx(text):
     """
@@ -43,6 +46,7 @@ def parse_text_and_sfx(text):
     clean_text = re.sub(r'\s+([.,!?;:])', r'\1', clean_text)
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text, sfx_markers
+
 
 def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PAUSE_BETWEEN_SENTENCES):
     """
@@ -131,10 +135,11 @@ def trim_and_compress_audio(audio_path, words, output_path, max_pause_sec=MAX_PA
     total_dur = len(new_audio) / 1000.0
     return total_dur, final_words
 
+
 def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
     """
     Barreja els efectes de so sobre la veu.
-    Si un so és al final (com el FAAAH), estén la pista perquè NO es talli mai.
+    Si un so és al final, estén la pista perquè NO es talli mai.
     """
     possible_dirs = [
         os.path.abspath("audios"),
@@ -182,6 +187,7 @@ def mix_sfx_into_audio(base_audio_path, sfx_events, output_path):
     final_duration_sec = len(base) / 1000.0
     return output_path, final_duration_sec
 
+
 def get_story_from_csv(csv_path="stories.csv"):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"No s'ha trobat el fitxer {csv_path}.")
@@ -210,6 +216,45 @@ def get_story_from_csv(csv_path="stories.csv"):
 
     return selected_story
 
+
+def get_random_instagram_audio_id(csv_path="instagram_audios.csv"):
+    """
+    Llegeix els IDs d'àudio del CSV i en tria un aleatòriament.
+    Si el CSV no existeix o està buit, fa servir la variable d'entorn INSTAGRAM_AUDIO_ID.
+    """
+    if os.path.exists(csv_path):
+        valid_items = []
+        with open(csv_path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and "audio_id" in reader.fieldnames:
+                for row in reader:
+                    aid = row.get("audio_id", "").strip()
+                    if aid:
+                        valid_items.append((aid, row.get("name", "").strip()))
+            else:
+                f.seek(0)
+                for line in f:
+                    line = line.strip()
+                    if line and not line.lower().startswith("audio_id"):
+                        parts = line.split(",")
+                        aid = parts[0].strip()
+                        name = parts[1].strip() if len(parts) > 1 else ""
+                        if aid:
+                            valid_items.append((aid, name))
+
+        if valid_items:
+            chosen_id, chosen_name = random.choice(valid_items)
+            name_info = f" ('{chosen_name}')" if chosen_name else ""
+            print(f"🎲 [Audio CSV] S'ha seleccionat aleatòriament: {chosen_id}{name_info}")
+            return chosen_id
+
+    # Fallback si no hi ha CSV
+    env_id = os.getenv("INSTAGRAM_AUDIO_ID")
+    if env_id:
+        print(f"ℹ️ [Audio Fallback] Fent servir INSTAGRAM_AUDIO_ID d'entorn: {env_id}")
+    return env_id
+
+
 def find_all_asset_videos():
     search_dirs = ["assets", "assets/backgrounds"]
     found = []
@@ -222,6 +267,7 @@ def find_all_asset_videos():
                         if not any(x in f.lower() for x in ["temp", "final_video", "title_card"]):
                             found.append(full_path)
     return list(set(found))
+
 
 def get_clean_background_video(target_duration):
     temp_dir = os.path.abspath("temp")
@@ -252,7 +298,6 @@ def get_clean_background_video(target_duration):
         with open(used_file, "a", encoding="utf-8") as f:
             f.write(chosen_name + "\n")
 
-        # Pas intermedi pràcticament lossless (CRF 14) per no degradar la font de 25 Mbps
         subprocess.run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-ss", "0",
             "-i", os.path.abspath(chosen),
@@ -274,6 +319,7 @@ def get_clean_background_video(target_duration):
             return temp_bg
 
     return None
+
 
 async def generate_speech_with_word_timestamps(text, audio_path):
     communicate = edge_tts.Communicate(
@@ -332,6 +378,7 @@ async def generate_speech_with_word_timestamps(text, audio_path):
                 })
 
     return total_dur, words
+
 
 def build_card_html(post):
     clean_story = strip_sfx_tags(post.get("story", ""))
@@ -517,6 +564,7 @@ def build_card_html(post):
 </body>
 </html>"""
 
+
 async def render_html_to_card_png(post, output_image_path):
     html_content = build_card_html(post)
     html_file = os.path.abspath("temp/card.html")
@@ -531,6 +579,7 @@ async def render_html_to_card_png(post, output_image_path):
         await card_el.screenshot(path=output_image_path, omit_background=True)
         await browser.close()
 
+
 def format_ass_time(seconds):
     hrs = int(seconds // 3600)
     mins = int((seconds % 3600) // 60)
@@ -539,6 +588,7 @@ def format_ass_time(seconds):
     if centis >= 100:
         centis = 99
     return f"{hrs}:{mins:02d}:{secs:02d}.{centis:02d}"
+
 
 def generate_popin_word_subtitles(words_list, output_path="temp/captions.ass"):
     ass_header = """[Script Info]
@@ -582,6 +632,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(dialogues) + "\n")
 
+
 def get_sfx_timestamp(word_idx, words_list, fallback_time):
     if not words_list:
         return fallback_time
@@ -590,6 +641,148 @@ def get_sfx_timestamp(word_idx, words_list, fallback_time):
     if word_idx < len(words_list):
         return words_list[word_idx]["start"]
     return words_list[-1]["end"]
+
+
+# ==============================================================================
+# INTEGRACIÓ ZERNIO: PUJADA DIRECTA I PUBLICACIÓ A INSTAGRAM I FACEBOOK
+# ==============================================================================
+
+def upload_video_to_zernio(file_path, api_key):
+    """Puja el vídeo generat a l'emmagatzematge de Zernio mitjançant URL presignada."""
+    file_size = os.path.getsize(file_path)
+    filename = os.path.basename(file_path)
+
+    print("\n📤 [Zernio] Sol·licitant URL presignada de pujada...")
+    presign_res = requests.post(
+        "https://zernio.com/api/v1/media/presign",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "filename": filename,
+            "contentType": "video/mp4",
+            "size": file_size
+        }
+    )
+    presign_res.raise_for_status()
+    presign_data = presign_res.json()
+    
+    upload_url = presign_data["uploadUrl"]
+    public_url = presign_data["publicUrl"]
+
+    print("⬆️ [Zernio] Pujant el fitxer de vídeo a Storage...")
+    with open(file_path, "rb") as f:
+        put_res = requests.put(
+            upload_url,
+            headers={"Content-Type": "video/mp4"},
+            data=f
+        )
+    put_res.raise_for_status()
+    print(f"✅ [Zernio] Vídeo allotjat amb èxit a: {public_url}")
+    return public_url
+
+
+def publish_story_to_social(video_url, title, story_text):
+    """Publica a Instagram Reels i Facebook Reels a través de la Zernio API."""
+    api_key = os.getenv("ZERNIO_API_KEY")
+    ig_account_id = os.getenv("ZERNIO_INSTAGRAM_ACCOUNT_ID")
+    fb_account_id = os.getenv("ZERNIO_FACEBOOK_ACCOUNT_ID")
+    
+    # Selecciona l'àudio d'Instagram aleatòriament del CSV (o fallback d'env)
+    ig_audio_id = get_random_instagram_audio_id("instagram_audios.csv")
+    
+    ig_audio_vol = int(os.getenv("INSTAGRAM_AUDIO_VOLUME", "18"))
+    ig_video_vol = int(os.getenv("INSTAGRAM_VIDEO_VOLUME", "100"))
+
+    if not api_key:
+        print("⚠️ ZERNIO_API_KEY no trobada. S'omet la publicació.")
+        return
+
+    platforms = []
+
+    # 1. Instagram Reels
+    if ig_account_id:
+        ig_config = {"shareToFeed": True}
+        if ig_audio_id:
+            print(f"🎵 [Zernio] Aplicant àudio a Instagram: {ig_audio_id} (Volum: {ig_audio_vol}%)")
+            ig_config["audioConfiguration"] = {
+                "audioId": ig_audio_id,
+                "audioVolume": ig_audio_vol,
+                "videoVolume": ig_video_vol
+            }
+
+        platforms.append({
+            "platform": "instagram",
+            "accountId": ig_account_id,
+            "platformSpecificData": ig_config
+        })
+
+    # 2. Facebook Reels
+    if fb_account_id:
+        platforms.append({
+            "platform": "facebook",
+            "accountId": fb_account_id,
+            "platformSpecificData": {
+                "contentType": "reel",
+                "title": title[:255]
+            }
+        })
+
+    if not platforms:
+        print("⚠️ Cal configurar ZERNIO_INSTAGRAM_ACCOUNT_ID o ZERNIO_FACEBOOK_ACCOUNT_ID.")
+        return
+
+    caption = f"{title}\n\nWhat would you have done? 👇\n\n#redditstories #reddit #storytime #confession #viral"
+
+    payload = {
+        "content": caption,
+        "mediaItems": [
+            {"type": "video", "url": video_url}
+        ],
+        "platforms": platforms,
+        "publishNow": True
+    }
+
+    print("🚀 [Zernio] Publicant a les plataformes seleccionades...")
+    post_res = requests.post(
+        "https://zernio.com/api/v1/posts",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json=payload
+    )
+
+    data = post_res.json()
+
+    if post_res.status_code == 207 or data.get("post", {}).get("status") == "failed":
+        print(f"❌ Error en publicar segons Zernio: {data.get('message')}")
+        for p in data.get("post", {}).get("platforms", []):
+            if p.get("status") == "failed":
+                print(f"   ⚠️ {p.get('platform')}: {p.get('errorMessage')}")
+        raise RuntimeError("La publicació ha fallat a una o més plataformes.")
+
+    print("\n🎉 POST PUBLICAT AMB ÈXIT!")
+    summary_lines = ["## 🚀 Vídeo publicat a Xarxes Socials!"]
+
+    for p in data.get("post", {}).get("platforms", []):
+        plat = p.get("platform")
+        url = p.get("platformPostUrl") or "Processant per Meta..."
+        print(f"   👉 {plat.upper()}: {url}")
+        summary_lines.append(f"- **{plat.upper()}**: [{url}]({url})")
+
+    github_summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if github_summary_path:
+        with open(github_summary_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(summary_lines) + "\n")
+
+    return data
+
+
+# ==============================================================================
+# PIPELINE PRINCIPAL
+# ==============================================================================
 
 async def main():
     os.makedirs("temp", exist_ok=True)
@@ -634,8 +827,6 @@ async def main():
 
     # 4. Calcular timestamps exactes dels SFX
     all_sfx_events = []
-    
-    # 💥 Pop automàtic sincronitzat amb la targeta d'inici (segon 0.0s)
     all_sfx_events.append((0.0, "pop"))
 
     for word_idx, sfx_name in title_sfx_markers:
@@ -667,8 +858,8 @@ async def main():
     # 7. Fons de vídeo
     temp_bg = get_clean_background_video(total_video_duration)
 
-    # 8. Muntatge final FFmpeg 100% optimitzat per a la Graph API d'Instagram (Reels)
-    print("🎞️ Renderitzant vídeo final amb especificacions d'Instagram API...")
+    # 8. Muntatge final FFmpeg optimitzat per a Meta / Reels
+    print("🎞️ Renderitzant vídeo final amb especificacions de Meta API...")
     escaped_ass = ass_path.replace("\\", "/").replace(":", "\\:")
     fade_out_start = max(0.0, title_dur - 0.25)
 
@@ -693,26 +884,21 @@ async def main():
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "2:a",
-        # CÒDEC I PERFIL EXIGIT PER META (H.264 High Profile Level 4.2)
         "-c:v", "libx264",
         "-preset", "fast",
         "-profile:v", "high",
         "-level:v", "4.2",
-        # CONTROL DE BITRATE I QUALITAT (Límit de seguretat a 25 Mbps)
         "-crf", "17",
         "-maxrate", "25M",
         "-bufsize", "25M",
-        # FLUIDESA: TAXA DE FOTOGRAMES CONSTANT (CFR) I CLOSED GOP A 1s
         "-g", "30",
         "-keyint_min", "30",
         "-sc_threshold", "0",
         "-fps_mode", "cfr",
-        # METADADES I COLOR REC.709
         "-movflags", "+faststart",
         "-colorspace", "bt709",
         "-color_primaries", "bt709",
         "-color_trc", "bt709",
-        # ÀUDIO OFICIAL INSTAGRAM (AAC-LC 48kHz Stereo 192k)
         "-c:a", "aac",
         "-b:a", "192k",
         "-ar", "48000",
@@ -726,7 +912,16 @@ async def main():
     subprocess.run(cmd, check=True)
     
     size_mb = os.path.getsize("final_video.mp4") / (1024 * 1024)
-    print(f"\n🎉 SUCCESS! final_video.mp4 generat amb èxit ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+    print(f"\n🎉 SUCCESS! final_video.mp4 generat ({size_mb:.2f} MB, {total_video_duration:.1f}s)")
+
+    # 9. Publicació automàtica a Zernio (Instagram i Facebook)
+    zernio_key = os.getenv("ZERNIO_API_KEY")
+    if zernio_key:
+        video_url = upload_video_to_zernio("final_video.mp4", zernio_key)
+        publish_story_to_social(video_url, title_clean, story_clean)
+    else:
+        print("\nℹ️ ZERNIO_API_KEY no detectada. El vídeo s'ha generat localment però no s'ha publicat.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

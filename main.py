@@ -199,6 +199,8 @@ def get_story_from_csv(csv_path="stories.csv"):
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         for row in reader:
+            # Elimina qualsevol camp extra o clau None provocada per comes no escapades
+            row.pop(None, None)
             if not selected_story and row.get("status", "pending") == "pending":
                 selected_story = row
                 row["status"] = "done"
@@ -210,7 +212,8 @@ def get_story_from_csv(csv_path="stories.csv"):
         selected_story = rows[0]
 
     with open(csv_path, mode="w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        # extrasaction="ignore" blinda l'escriptura davant de columnes imprevistes
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

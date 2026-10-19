@@ -217,44 +217,6 @@ def get_story_from_csv(csv_path="stories.csv"):
     return selected_story
 
 
-def get_random_instagram_audio_id(csv_path="instagram_audios.csv"):
-    """
-    Llegeix els IDs d'àudio del CSV i en tria un aleatòriament.
-    Si el CSV no existeix o està buit, fa servir la variable d'entorn INSTAGRAM_AUDIO_ID.
-    """
-    if os.path.exists(csv_path):
-        valid_items = []
-        with open(csv_path, mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames and "audio_id" in reader.fieldnames:
-                for row in reader:
-                    aid = row.get("audio_id", "").strip()
-                    if aid:
-                        valid_items.append((aid, row.get("name", "").strip()))
-            else:
-                f.seek(0)
-                for line in f:
-                    line = line.strip()
-                    if line and not line.lower().startswith("audio_id"):
-                        parts = line.split(",")
-                        aid = parts[0].strip()
-                        name = parts[1].strip() if len(parts) > 1 else ""
-                        if aid:
-                            valid_items.append((aid, name))
-
-        if valid_items:
-            chosen_id, chosen_name = random.choice(valid_items)
-            name_info = f" ('{chosen_name}')" if chosen_name else ""
-            print(f"🎲 [Audio CSV] S'ha seleccionat aleatòriament: {chosen_id}{name_info}")
-            return chosen_id
-
-    # Fallback si no hi ha CSV
-    env_id = os.getenv("INSTAGRAM_AUDIO_ID")
-    if env_id:
-        print(f"ℹ️ [Audio Fallback] Fent servir INSTAGRAM_AUDIO_ID d'entorn: {env_id}")
-    return env_id
-
-
 def find_all_asset_videos():
     search_dirs = ["assets", "assets/backgrounds"]
     found = []
@@ -644,7 +606,7 @@ def get_sfx_timestamp(word_idx, words_list, fallback_time):
 
 
 # ==============================================================================
-# INTEGRACIÓ ZERNIO: PUJADA DIRECTA I PUBLICACIÓ A INSTAGRAM I FACEBOOK
+# INTEGRACIÓ ZERNIO: PUJADA DIRECTA I PUBLICACIÓ AMB ÀUDIO ORIGINAL
 # ==============================================================================
 
 def upload_video_to_zernio(file_path, api_key):
@@ -684,16 +646,14 @@ def upload_video_to_zernio(file_path, api_key):
 
 
 def publish_story_to_social(video_url, title, story_text):
-    """Publica a Instagram Reels i Facebook Reels a través de la Zernio API."""
+    """
+    Publica a Instagram Reels i Facebook Reels a través de Zernio.
+    S'utilitza exclusivament l'àudio original del propi vídeo (veu Jenny + SFX).
+    Sense cap àudio afegit de catàleg per evitar problemes de llicència o caducitat.
+    """
     api_key = os.getenv("ZERNIO_API_KEY")
     ig_account_id = os.getenv("ZERNIO_INSTAGRAM_ACCOUNT_ID")
     fb_account_id = os.getenv("ZERNIO_FACEBOOK_ACCOUNT_ID")
-    
-    # Selecciona l'àudio d'Instagram aleatòriament del CSV (o fallback d'env)
-    ig_audio_id = get_random_instagram_audio_id("instagram_audios.csv")
-    
-    ig_audio_vol = int(os.getenv("INSTAGRAM_AUDIO_VOLUME", "18"))
-    ig_video_vol = int(os.getenv("INSTAGRAM_VIDEO_VOLUME", "100"))
 
     if not api_key:
         print("⚠️ ZERNIO_API_KEY no trobada. S'omet la publicació.")
@@ -701,21 +661,14 @@ def publish_story_to_social(video_url, title, story_text):
 
     platforms = []
 
-    # 1. Instagram Reels
+    # 1. Instagram Reels (Sense audioConfiguration: farà servir el so original del vídeo)
     if ig_account_id:
-        ig_config = {"shareToFeed": True}
-        if ig_audio_id:
-            print(f"🎵 [Zernio] Aplicant àudio a Instagram: {ig_audio_id} (Volum: {ig_audio_vol}%)")
-            ig_config["audioConfiguration"] = {
-                "audioId": ig_audio_id,
-                "audioVolume": ig_audio_vol,
-                "videoVolume": ig_video_vol
-            }
-
         platforms.append({
             "platform": "instagram",
             "accountId": ig_account_id,
-            "platformSpecificData": ig_config
+            "platformSpecificData": {
+                "shareToFeed": True
+            }
         })
 
     # 2. Facebook Reels
@@ -744,7 +697,7 @@ def publish_story_to_social(video_url, title, story_text):
         "publishNow": True
     }
 
-    print("🚀 [Zernio] Publicant a les plataformes seleccionades...")
+    print("🚀 [Zernio] Publicant a Instagram Reels i Facebook Reels (amb àudio original net)...")
     post_res = requests.post(
         "https://zernio.com/api/v1/posts",
         headers={
@@ -756,6 +709,7 @@ def publish_story_to_social(video_url, title, story_text):
 
     data = post_res.json()
 
+    # Comprovació d'estat 207 o fallades de plataforma
     if post_res.status_code == 207 or data.get("post", {}).get("status") == "failed":
         print(f"❌ Error en publicar segons Zernio: {data.get('message')}")
         for p in data.get("post", {}).get("platforms", []):
@@ -764,7 +718,7 @@ def publish_story_to_social(video_url, title, story_text):
         raise RuntimeError("La publicació ha fallat a una o més plataformes.")
 
     print("\n🎉 POST PUBLICAT AMB ÈXIT!")
-    summary_lines = ["## 🚀 Vídeo publicat a Xarxes Socials!"]
+    summary_lines = ["## 🚀 Vídeo publicat a Xarxes Socials (So Original)!"]
 
     for p in data.get("post", {}).get("platforms", []):
         plat = p.get("platform")

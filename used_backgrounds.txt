@@ -16,3 +16,4 @@ Minecraft.Parkour.3.5.mp4
 Minecraft.Parkour.3.mp4
 Minecraft.Parkour.3.6.mp4
 Minecraft.Parkour.3.3.mp4
+Minecraft.Parkour.3.9.mp4
